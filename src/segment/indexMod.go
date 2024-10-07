@@ -8,13 +8,13 @@ import (
 	"path/filepath"
 
 	"bagh/descriptor"
-	"bagh/diskblock"
+	"bagh/disk"
 	"bagh/file"
 	"bagh/value"
 )
 
 type BlockHandleBlock struct {
-	diskblock.DiskBlock[BlockHandle]
+	disk.DiskBlock[BlockHandle]
 }
 
 func (bhb *BlockHandleBlock) GetPreviousBlockInfo(key []byte) *BlockHandle {
@@ -69,7 +69,7 @@ func (bi *BlockIndex) GetPrefixUpperBound(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err := bi.loadAndCacheIndexBlock(blockKey, blockHandle)
+	indexBlock, err := bi.LoadAndCacheIndexBlock(blockKey, blockHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func (bi *BlockIndex) GetUpperBoundBlockInfo(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err := bi.loadAndCacheIndexBlock(blockKey, blockHandle)
+	indexBlock, err := bi.LoadAndCacheIndexBlock(blockKey, blockHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (bi *BlockIndex) GetLowerBoundBlockInfo(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err := bi.loadAndCacheIndexBlock(blockKey, blockHandle)
+	indexBlock, err := bi.LoadAndCacheIndexBlock(blockKey, blockHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -128,15 +128,16 @@ func (b *BlockIndex) GetPreviousBlockKey(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err := b.loadAndCacheIndexBlock(firstBlockKey, firstBlockHandle)
+	indexBlock, err := b.LoadAndCacheIndexBlock(firstBlockKey, firstBlockHandle)
 	if err != nil {
 		return nil, err
 	}
 
 	maybePrev := indexBlock.GetPreviousBlockInfo(key)
 
+	// @TODO: : Might have to clone here, not sure and all subsequent places in this file
 	if maybePrev != nil {
-		return maybePrev.Clone(), nil
+		return maybePrev, nil
 	}
 
 	prevBlockKey, prevBlockHandle, found := b.topLevelIndex.GetPreviousBlockHandle(firstBlockKey)
@@ -144,12 +145,13 @@ func (b *BlockIndex) GetPreviousBlockKey(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err = b.loadAndCacheIndexBlock(prevBlockKey, prevBlockHandle)
+	indexBlock, err = b.LoadAndCacheIndexBlock(prevBlockKey, prevBlockHandle)
 	if err != nil {
 		return nil, err
 	}
 
-	return indexBlock.Items[len(indexBlock.Items)-1].Clone(), nil
+	// @TODO: : Might have to clone here, not sure
+	return &indexBlock.Items[len(indexBlock.Items)-1], nil
 }
 
 func (b *BlockIndex) GetNextBlockKey(key []byte) (*BlockHandle, error) {
@@ -158,7 +160,7 @@ func (b *BlockIndex) GetNextBlockKey(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err := b.loadAndCacheIndexBlock(firstBlockKey, firstBlockHandle)
+	indexBlock, err := b.LoadAndCacheIndexBlock(firstBlockKey, firstBlockHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +168,7 @@ func (b *BlockIndex) GetNextBlockKey(key []byte) (*BlockHandle, error) {
 	maybeNext := indexBlock.GetNextBlockInfo(key)
 
 	if maybeNext != nil {
-		return maybeNext.Clone(), nil
+		return maybeNext, nil
 	}
 
 	nextBlockKey, nextBlockHandle, found := b.topLevelIndex.GetNextBlockHandle(firstBlockKey)
@@ -174,17 +176,17 @@ func (b *BlockIndex) GetNextBlockKey(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err = b.loadAndCacheIndexBlock(nextBlockKey, nextBlockHandle)
+	indexBlock, err = b.LoadAndCacheIndexBlock(nextBlockKey, nextBlockHandle)
 	if err != nil {
 		return nil, err
 	}
 
-	return indexBlock.Items[0].Clone(), nil
+	return &indexBlock.Items[0], nil
 }
 
 func (b *BlockIndex) GetFirstBlockKey() (*BlockHandle, error) {
 	blockKey, blockHandle := b.topLevelIndex.GetFirstBlockHandle()
-	indexBlock, err := b.loadAndCacheIndexBlock(blockKey, blockHandle)
+	indexBlock, err := b.LoadAndCacheIndexBlock(blockKey, blockHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -193,12 +195,12 @@ func (b *BlockIndex) GetFirstBlockKey() (*BlockHandle, error) {
 		return nil, fmt.Errorf("block should not be empty")
 	}
 
-	return indexBlock.Items[0].Clone(), nil
+	return &indexBlock.Items[0], nil
 }
 
 func (b *BlockIndex) GetLastBlockKey() (*BlockHandle, error) {
 	blockKey, blockHandle := b.topLevelIndex.GetLastBlockHandle()
-	indexBlock, err := b.loadAndCacheIndexBlock(blockKey, blockHandle)
+	indexBlock, err := b.LoadAndCacheIndexBlock(blockKey, blockHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +209,11 @@ func (b *BlockIndex) GetLastBlockKey() (*BlockHandle, error) {
 		return nil, fmt.Errorf("block should not be empty")
 	}
 
-	return indexBlock.Items[len(indexBlock.Items)-1].Clone(), nil
+	return &indexBlock.Items[len(indexBlock.Items)-1], nil
 }
 
 // loads a block from disk
-func (b *BlockIndex) loadAndCacheIndexBlock(blockKey []byte, blockHandle *BlockHandleBlockHandle) (*DiskBlock, error) {
+func (b *BlockIndex) LoadAndCacheIndexBlock(blockKey []byte, blockHandle *BlockHandleBlockHandle) (*BlockHandleBlock, error) {
 	if block := b.blocks.Get(b.segmentID, blockKey); block != nil {
 		// cache hit, so return :)
 		return block, nil
@@ -222,15 +224,15 @@ func (b *BlockIndex) loadAndCacheIndexBlock(blockKey []byte, blockHandle *BlockH
 		return nil, err
 	}
 	defer fileGuard.Release() // defer or release earlier? @TODO:
+	db := new(BlockHandleBlock)
 
-	block, err := FromFileCompressed(fileGuard.File, blockHandle.Offset, blockHandle.Size)
-	if err != nil {
+	if err := db.FromFileCompressed(fileGuard.File(), int64(blockHandle.Offset), blockHandle.Size); err != nil {
 		return nil, err
 	}
 
-	b.blocks.Insert(b.segmentID, blockKey, block)
+	b.blocks.Insert(b.segmentID, blockKey, db)
 
-	return block, nil
+	return db, nil
 }
 
 func (b *BlockIndex) GetLatest(key []byte) (*BlockHandle, error) {
@@ -239,15 +241,15 @@ func (b *BlockIndex) GetLatest(key []byte) (*BlockHandle, error) {
 		return nil, nil
 	}
 
-	indexBlock, err := b.loadAndCacheIndexBlock(blockKey, indexBlockHandle)
+	indexBlock, err := b.LoadAndCacheIndexBlock(blockKey, indexBlockHandle)
 	if err != nil {
 		return nil, err
 	}
 
-	return indexBlock.GetLowerBoundBlockInfo(key).Clone(), nil
+	return indexBlock.GetLowerBoundBlockInfo(key), nil
 }
 
-func NewBlockIndex(segmentID string, blockCache *blockcache.BlockCache) *BlockIndex {
+func NewBlockIndex(segmentID string, blockCache *BlockCache) *BlockIndex {
 	indexBlockIndex := &BlockHandleBlockIndex{
 		cache: blockCache,
 	}
@@ -260,51 +262,56 @@ func NewBlockIndex(segmentID string, blockCache *blockcache.BlockCache) *BlockIn
 	}
 }
 
-func (b *BlockIndex) FromFile(segmentID string, descriptorTable *descriptor.FileDescriptorTable, path string, blockCache *blockcache.BlockCache) (*BlockIndex, error) {
+func (b *BlockIndex) FromFile(segmentID string, descriptorTable *descriptor.FileDescriptorTable, path string, blockCache *BlockCache) error {
 	log.Printf("Reading block index from %s", path)
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("%s missing", path)
+		return err
 	}
 	if _, err := os.Stat(filepath.Join(path, file.TopLevelIndexFile)); os.IsNotExist(err) {
-		return nil, fmt.Errorf("%s missing", filepath.Join(path, file.TopLevelIndexFile))
+		return err
 	}
 	if _, err := os.Stat(filepath.Join(path, file.BlocksFile)); os.IsNotExist(err) {
-		return nil, fmt.Errorf("%s missing", filepath.Join(path, file.BlocksFile))
+		return err
 	}
 
 	fileInfo, err := os.Stat(filepath.Join(path, file.TopLevelIndexFile))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	file, err := os.Open(filepath.Join(path, file.TopLevelIndexFile))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer file.Close()
-
-	index, err := FromFileCompressed(file, 0, uint32(fileInfo.Size()))
-	if err != nil {
-		return nil, err
+	indexBlock := new(BlockHandleBlock)
+	if err := indexBlock.FromFileCompressed(file, 0, uint32(fileInfo.Size())); err != nil {
+		return err
 	}
 
-	if len(index.Items) == 0 {
-		return nil, fmt.Errorf("index is empty")
+	if len(indexBlock.Items) == 0 {
+		return fmt.Errorf("index is empty")
 	}
-
-	tree := Btreemapnew()
-	for _, item := range index.Items {
+	// @P2: using normal map, should use some red black tree for faster range queries
+	tree := make(map[string]*BlockHandleBlockHandle)
+	for _, item := range indexBlock.Items {
 		tree[string(item.StartKey)] = &BlockHandleBlockHandle{
 			Offset: item.Offset,
 			Size:   item.Size,
 		}
 	}
 
-	return &BlockIndex{
-		descriptorTable: descriptorTable,
-		segmentID:       segmentID,
-		topLevelIndex:   NewTopLevelIndex(tree),
-		blocks:          &BlockHandleBlockIndex{blockCache},
-	}, nil
+	b.descriptorTable = descriptorTable
+	b.blocks = &BlockHandleBlockIndex{blockCache}
+	b.topLevelIndex = NewTopLevelIndex(tree)
+	b.segmentID = segmentID
+
+	//  = &BlockIndex{
+	// 	descriptorTable: descriptorTable,
+	// 	segmentID:       segmentID,
+	// 	topLevelIndex:   NewTopLevelIndex(tree),
+	// 	blocks:          &BlockHandleBlockIndex{blockCache},
+	// }
+	return nil
 }

@@ -1,17 +1,16 @@
 package segment
 
 import (
-	"errors"
 	"unsafe"
 
-	descriptor "bagh/descriptor"
-	"bagh/diskblock"
+	"bagh/descriptor"
+	"bagh/disk"
 	"bagh/value"
 )
 
 // ValueBlock is a type alias for DiskBlock<Value>
 type ValueBlock struct {
-	diskblock.DiskBlock[value.Value]
+	disk.DiskBlock[value.Value]
 }
 
 // @TODO: this might be wrong
@@ -40,7 +39,7 @@ func LoadAndCacheByBlockHandle(
 		return nil, err
 	}
 	if fileGuard == nil {
-		return nil, errors.New("should acquire file handle")
+		return nil, err
 	}
 
 	file := fileGuard.File()

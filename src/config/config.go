@@ -14,11 +14,11 @@ const (
 
 // PersistedConfig represents the tree configuration
 type PersistedConfig struct {
-	Path       string
-	BlockSize  uint32
-	LevelCount uint8
-	LevelRatio uint8
-	Type       TreeType
+	Path       string   `json:"path"`
+	BlockSize  uint32   `json:"block_size"`
+	LevelCount uint8    `json:"level_count"`
+	LevelRatio uint8    `json:"level_ratio"`
+	Type       TreeType `json:"type"`
 }
 
 const DEFAULT_FILE_FOLDER = ".lsm.data"

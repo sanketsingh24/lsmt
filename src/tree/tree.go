@@ -2,16 +2,28 @@ package tree
 
 import (
 	"bagh/config"
-	"bagh/snapshot"
-	treeinner "bagh/treeInner"
+	"bagh/descriptor"
+	"bagh/file"
+	"bagh/flush"
+	"bagh/id"
+	"bagh/levels"
+	"bagh/memtable"
+	"bagh/prefix"
+	"bagh/ranger"
+	"bagh/segment"
+	"bagh/stop"
 	"bagh/value"
+	"bagh/version"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 )
 
 type Tree struct {
-	TreeInner *treeinner.TreeInner
+	TreeInner *TreeInner
 }
 
 /// Opens an LSM-tree in the given directory.
@@ -28,179 +40,196 @@ type Tree struct {
 /// Returns error, if an IO error occured.
 
 func Open(config config.Config) (*Tree, error) {
-	fmt.Printf("Opening LSM-tree at %s", config.Inner.Path)
+	fmt.Println("Opening LSM-tree at %s", config.Inner.Path)
 
-	// @P2::::: @TODO:
-	// if exists, err := config.Inner.Path.Join(file.LSMMarker).Exists(); err != nil {
-	// 	return nil, err
-	// } else if exists {
-	// 	return Recover(config.Inner.Path, config.BlockCache, config.DescriptorTable)
-	// } else {
-	return CreateNew(config)
-	// }
-}
+	var tree *Tree
+	var err error
 
-func (t *Tree) Compact(strategy CompactionStrategy) error {
-	options := &CompactionOptions{
-		Config:          t.TreeInner.Config.Clone(),
-		SealedMemtables: t.TreeInner.SealedMemtables.Clone(),
-		Levels:          t.TreeInner.Levels.Clone(),
-		OpenSnapshots:   t.TreeInner.OpenSnapshots.Clone(),
-		StopSignal:      t.TreeInner.StopSignal.Clone(),
-		BlockCache:      t.TreeInner.BlockCache.Clone(),
-		Strategy:        strategy,
-		DescriptorTable: t.TreeInner.DescriptorTable.Clone(),
+	if _, err := os.Stat(filepath.Join(config.Inner.Path, file.LSMMarker)); err == nil {
+		tree, err = Recover(config.Inner.Path, config.BlockCache, config.DescriptorTable)
+	} else if os.IsNotExist(err) {
+		tree, err = CreateNew(config)
 	}
-	if err := doCompaction(options); err != nil {
-		return err
+
+	if err != nil {
+		return nil, err
 	}
-	fmt.Printf("lsm-tree: compaction run over")
-	return nil
+
+	return tree, nil
 }
 
-func (t *Tree) MajorCompact(targetSize uint64) error {
-	fmt.Printf("Starting major compaction")
-	strategy := NewMajorCompactionStrategy(targetSize)
-	return t.Compact(strategy)
-}
+// func (t *Tree) Compact(strategy CompactionStrategy) error {
+// 	options := &CompactionOptions{
+// 		Config:          t.TreeInner.Config.Clone(),
+// 		SealedMemtables: t.TreeInner.SealedMemtables.Clone(),
+// 		Levels:          t.TreeInner.Levels.Clone(),
+// 		OpenSnapshots:   t.TreeInner.OpenSnapshots.Clone(),
+// 		StopSignal:      t.TreeInner.StopSignal.Clone(),
+// 		BlockCache:      t.TreeInner.BlockCache.Clone(),
+// 		Strategy:        strategy,
+// 		DescriptorTable: t.TreeInner.DescriptorTable.Clone(),
+// 	}
+// 	if err := doCompaction(options); err != nil {
+// 		return err
+// 	}
+// 	fmt.Printf("lsm-tree: compaction run over")
+// 	return nil
+// }
 
-func (t *Tree) Snapshot(seqno value.SeqNo) *snapshot.Snapshot {
-	return snapshot.NewSnapshot(t.Clone(), seqno)
+// func (t *Tree) MajorCompact(targetSize uint64) error {
+// 	fmt.Printf("Starting major compaction")
+// 	strategy := NewMajorCompactionStrategy(targetSize)
+// 	return t.Compact(strategy)
+// }
+
+func (t *Tree) Snapshot(seqno value.SeqNo) *Snapshot {
+	return NewSnapshot(t, seqno)
 }
 
 func (t *Tree) RegisterSegments(segments []segment.Segment) error {
-	levels := t.TreeInner.Levels.WriteLock()
-	defer levels.Unlock()
+	t.TreeInner.LevelsMutex.Lock()
+	t.TreeInner.SealedMutex.Lock()
+	defer t.TreeInner.LevelsMutex.Unlock()
+	defer t.TreeInner.SealedMutex.Unlock()
 
 	for _, segment := range segments {
-		levels.Add(segment)
+		t.TreeInner.Levels.Add(&segment)
 	}
-
-	sealedMemtables := t.TreeInner.SealedMemtables.WriteLock()
-	defer sealedMemtables.Unlock()
 
 	for _, segment := range segments {
-		sealedMemtables.Remove(segment.Metadata.ID)
+		delete(t.TreeInner.SealedMemtables, segment.Metadata.ID)
 	}
 
-	if err := levels.WriteToDisk(); err != nil {
+	if err := t.TreeInner.Levels.WriteToDisk(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (t *Tree) FlushActiveMemtable() (PathBuf, error) {
-	log.Debug("flush: flushing active memtable")
+func (t *Tree) FlushActiveMemtable() (string, error) {
+	fmt.Println("flush: flushing active memtable")
 
-	if segmentID, yankedMemtable := t.RotateMemtable(); segmentID != nil && yankedMemtable != nil {
-		segmentFolder := t.Config.Path.Join(SEGMENTS_FOLDER)
-		log.Debugf("flush: writing segment to %s", segmentFolder.String())
-
-		segment := FlushToSegment(&FlushOptions{
-			Memtable:        yankedMemtable,
-			BlockCache:      t.BlockCache,
-			BlockSize:       t.Config.BlockSize,
-			Folder:          segmentFolder,
-			SegmentID:       segmentID,
-			DescriptorTable: t.DescriptorTable,
-		})
-		if segment != nil {
-			segment = &Segment{Metadata: segment.Metadata}
-			if err := t.RegisterSegments([]Segment{*segment}); err != nil {
-				return nil, err
-			}
-			return segment.Metadata.Path, nil
-		}
+	segmentID, yankedMemtable := t.RotateMemtable()
+	if segmentID == nil || yankedMemtable == nil {
+		return "", nil
 	}
-	return nil, nil
+
+	segmentFolder := filepath.Join(t.TreeInner.Config.Path, file.SegmentsFolder)
+	fmt.Printf("flush: writing segment to %s", segmentFolder)
+
+	sg, err := flush.FlushToSegment(flush.Options{
+		BlockCache:      t.TreeInner.BlockCache,
+		BlockSize:       t.TreeInner.Config.BlockSize,
+		Folder:          segmentFolder,
+		SegmentID:       *segmentID,
+		MemTable:        yankedMemtable,
+		DescriptorTable: t.TreeInner.DescriptorTable,
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	resultPath := sg.Metadata.Path
+
+	err = t.RegisterSegments([]segment.Segment{*sg})
+	if err != nil {
+		return "", err
+	}
+
+	print("flush: thread done")
+	return resultPath, nil
 }
 
+// @TODO: dont think we need locks here and next as well
 func (t *Tree) IsCompacting() bool {
-	levels := t.Levels.ReadLock()
-	defer levels.Unlock()
-	return levels.IsCompacting()
+	t.TreeInner.LevelsMutex.RLock()
+	defer t.TreeInner.LevelsMutex.RUnlock()
+	return t.TreeInner.Levels.IsCompacting()
 }
 
+// FirstLevelSegmentCount returns the amount of disk segments in the first level
 func (t *Tree) FirstLevelSegmentCount() int {
-	levels := t.Levels.ReadLock()
-	defer levels.Unlock()
-	return levels.FirstLevelSegmentCount()
+	t.TreeInner.LevelsMutex.RLock()
+	defer t.TreeInner.LevelsMutex.RUnlock()
+	return t.TreeInner.Levels.FirstLevelSegmentCount()
 }
 
+// SegmentCount returns the amount of disk segments currently in the tree
 func (t *Tree) SegmentCount() int {
-	levels := t.Levels.ReadLock()
-	defer levels.Unlock()
-	return len(levels.GetAllSegments())
+	t.TreeInner.LevelsMutex.RLock()
+	defer t.TreeInner.LevelsMutex.RUnlock()
+	return t.TreeInner.Levels.Len()
 }
 
+// ApproximateLen approximates the amount of items in the tree
 func (t *Tree) ApproximateLen() uint64 {
-	memtable := t.ActiveMemtable.ReadLock()
-	defer memtable.Unlock()
-	levels := t.Levels.ReadLock()
-	defer levels.Unlock()
+	t.TreeInner.ActiveMutex.RLock()
+	memtableLen := uint64(t.TreeInner.ActiveMemtable.Len())
+	t.TreeInner.ActiveMutex.RUnlock()
 
-	var totalCount uint64
-	totalCount += uint64(memtable.Len())
-	for _, segment := range levels.GetAllSegmentsFlattened() {
-		totalCount += segment.Metadata.ItemCount
+	t.TreeInner.LevelsMutex.RLock()
+	segments := t.TreeInner.Levels.GetAllSegmentsFlattened()
+	t.TreeInner.LevelsMutex.RUnlock()
+
+	var segmentsLen uint64
+	for _, segment := range segments {
+		segmentsLen += segment.Metadata.ItemCount
 	}
-	return totalCount
+
+	return memtableLen + segmentsLen
 }
 
 func (t *Tree) ActiveMemtableSize() uint32 {
-	memtable := t.ActiveMemtable.ReadLock()
-	defer memtable.Unlock()
-	return memtable.ApproximateSize.Load()
+	t.TreeInner.ActiveMutex.RLock()
+	defer t.TreeInner.ActiveMutex.RUnlock()
+	return t.TreeInner.ActiveMemtable.ApproximateSize.Load()
 }
 
-func (t *Tree) LockActiveMemtable() *MemTable {
-	return t.ActiveMemtable.WriteLock()
-}
-
-func (t *Tree) LockSealedMemtables() *SealedMemtables {
-	return t.SealedMemtables.WriteLock()
-}
-
-func (t *Tree) RotateMemtable() (Arc[str], *MemTable) {
-	log.Trace("rotate: acquiring active memtable write lock")
-	activeMemtable := t.LockActiveMemtable()
+func (t *Tree) RotateMemtable() (*string, *memtable.MemTable) {
+	fmt.Printf("rotate: acquiring active memtable write lock")
+	t.TreeInner.ActiveMutex.Lock()
+	defer t.TreeInner.ActiveMutex.Unlock()
+	activeMemtable := t.TreeInner.ActiveMemtable
 	if len(activeMemtable.Items) == 0 {
 		return nil, nil
 	}
 
-	log.Trace("rotate: acquiring sealed memtables write lock")
-	sealedMemtables := t.LockSealedMemtables()
-	defer sealedMemtables.Unlock()
+	fmt.Printf("rotate: acquiring sealed memtables write lock")
+	t.TreeInner.SealedMutex.Lock()
+	defer t.TreeInner.SealedMutex.Unlock()
+	sealedMemtables := t.TreeInner.SealedMemtables
 
-	yankedMemtable := activeMemtable.Clone()
-	tmpMemtableID := generateSegmentID()
-	sealedMemtables.Insert(tmpMemtableID, yankedMemtable)
+	yankedMemtable, _ := activeMemtable.Clone()
+	tmpMemtableID := id.GenerateSegmentID()
+	sealedMemtables[tmpMemtableID] = yankedMemtable
 
-	return tmpMemtableID, yankedMemtable
+	return &tmpMemtableID, yankedMemtable
 }
 
-func (t *Tree) SetActiveMemtable(memtable MemTable) {
-	activeMemtable := t.ActiveMemtable.WriteLock()
-	*activeMemtable = memtable
-	activeMemtable.Unlock()
+func (t *Tree) SetActiveMemtable(memtable *memtable.MemTable) {
+	t.TreeInner.ActiveMutex.Lock()
+	defer t.TreeInner.ActiveMutex.Unlock()
+	t.TreeInner.ActiveMemtable = memtable
 }
 
-func (t *Tree) FreeSealedMemtable(id Arc[str]) {
-	sealedMemtables := t.SealedMemtables.WriteLock()
-	defer sealedMemtables.Unlock()
-	sealedMemtables.Remove(id)
+func (t *Tree) FreeSealedMemtable(id string) {
+	t.TreeInner.SealedMutex.Lock()
+	defer t.TreeInner.SealedMutex.Unlock()
+	delete(t.TreeInner.SealedMemtables, id)
 }
 
-func (t *Tree) AddSealedMemtable(id Arc[str], memtable Arc[MemTable]) {
-	sealedMemtables := t.SealedMemtables.WriteLock()
-	defer sealedMemtables.Unlock()
-	sealedMemtables.Insert(id, memtable)
+func (t *Tree) AddSealedMemtable(id string, memtable *memtable.MemTable) {
+	t.TreeInner.SealedMutex.Lock()
+	defer t.TreeInner.SealedMutex.Unlock()
+	t.TreeInner.SealedMemtables[id] = memtable
 }
 
 func (t *Tree) Len() (int, error) {
 	var count int
-	for item := range t.Iter() {
+	items := t.Iter().Segments
+	for _, item := range items {
 		if item != nil {
 			count++
 		}
@@ -209,170 +238,213 @@ func (t *Tree) Len() (int, error) {
 }
 
 func (t *Tree) IsEmpty() (bool, error) {
-	_, ok := t.FirstKeyValue()
+	_, _, ok := t.FirstKeyValue()
 	return !ok, nil
 }
 
-func (t *Tree) GetInternalEntry(key []byte, evictTombstone bool, seqno SeqNo) (Value, error) {
-	memtableLock := t.ActiveMemtable.ReadLock()
-	defer memtableLock.Unlock()
+func IgnoreTombstoneValue(item *value.Value) *value.Value {
+	if item.IsTombstone() {
+		return nil
+	}
+	return item
+}
 
-	if item := memtableLock.Get(key, seqno); item != nil {
+func (t *Tree) GetInternalEntry(key []byte, evictTombstone bool, seqno *value.SeqNo) (*value.Value, error) {
+	t.TreeInner.ActiveMutex.Lock()
+
+	if item := t.TreeInner.ActiveMemtable.Get(key, seqno); item != nil {
 		if evictTombstone {
-			return ignoreTombstoneValue(item), nil
+			return IgnoreTombstoneValue(item), nil
 		}
 		return item, nil
 	}
 
-	memtableLock.Unlock()
+	t.TreeInner.ActiveMutex.Unlock()
+	t.TreeInner.SealedMutex.Lock()
+	sealedMemtables := t.TreeInner.SealedMemtables
 
-	sealedMemtablesLock := t.SealedMemtables.ReadLock()
-	defer sealedMemtablesLock.Unlock()
-
-	for _, memtable := range sealedMemtablesLock.GetAll() {
+	for _, memtable := range sealedMemtables {
 		if item := memtable.Get(key, seqno); item != nil {
 			if evictTombstone {
-				return ignoreTombstoneValue(item), nil
+				return IgnoreTombstoneValue(item), nil
 			}
 			return item, nil
 		}
 	}
+	t.TreeInner.SealedMutex.Unlock()
 
-	segmentsLock := t.Levels.ReadLock()
-	defer segmentsLock.Unlock()
+	t.TreeInner.LevelsMutex.Lock()
+	segmentsLock := t.TreeInner.Levels
 
 	for _, segment := range segmentsLock.GetAllSegmentsFlattened() {
 		if item, err := segment.Get(key, seqno); err == nil && item != nil {
 			if evictTombstone {
-				return ignoreTombstoneValue(item), nil
+				return IgnoreTombstoneValue(item), nil
 			}
 			return item, nil
 		}
 	}
+	t.TreeInner.LevelsMutex.Unlock()
 
 	return nil, nil
 }
 
-func (t *Tree) Get(key []byte) (UserValue, error) {
-	if item, err := t.GetInternalEntry(key, true, nil); err == nil {
-		return item.Value, nil
-	}
-	return nil, err
-}
-
-func (t *Tree) Insert(key, value []byte, seqno SeqNo) (uint32, uint32) {
-	item := NewValue(key, value, seqno, ValueTypeValue)
-	return t.AppendEntry(item)
-}
-
-func (t *Tree) Remove(key []byte, seqno SeqNo) (uint32, uint32) {
-	item := NewValue(key, nil, seqno, ValueTypeTombstone)
-	return t.AppendEntry(item)
-}
-
-func (t *Tree) ContainsKey(key []byte) (bool, error) {
-	if item, err := t.Get(key); err == nil {
-		return item != nil, nil
-	}
-	return false, err
-}
-
-func (t *Tree) CreateIter(seqno SeqNo) *Range {
-	return t.CreateRange(nil, nil, seqno)
-}
-
-func (t *Tree) Iter() *Range {
-	return t.CreateIter(nil)
-}
-
-func (t *Tree) CreateRange(lo, hi Bound[UserKey], seqno SeqNo) *Range {
-	segmentInfo := t.Levels.ReadLock().GetAllSegments().Filter(func(s *Segment) bool {
-		return s.CheckKeyRangeOverlap(lo, hi)
-	})
-	return NewRange(
-		&MemTableGuard{
-			Active: t.ActiveMemtable.ReadLock(),
-			Sealed: t.SealedMemtables.ReadLock(),
-		},
-		lo, hi,
-		segmentInfo,
-		seqno,
-	)
-}
-
-func (t *Tree) Range(start, end []byte) *Range {
-	return t.CreateRange(Included(start), Included(end), nil)
-}
-
-func (t *Tree) CreatePrefix(prefix []byte, seqno SeqNo) *Prefix {
-	segmentInfo := t.Levels.ReadLock().GetAllSegments().Filter(func(s *Segment) bool {
-		return s.CheckPrefixOverlap(prefix)
-	})
-	return NewPrefix(
-		&MemTableGuard{
-			Active: t.ActiveMemtable.ReadLock(),
-			Sealed: t.SealedMemtables.ReadLock(),
-		},
-		prefix,
-		segmentInfo,
-		seqno,
-	)
-}
-
-func (t *Tree) Prefix(prefix []byte) *Prefix {
-	return t.CreatePrefix(prefix, nil)
-}
-
-func (t *Tree) FirstKeyValue() (UserKey, UserValue, bool) {
-	item, ok := <-t.Iter()
-	if !ok {
-		return nil, nil, false
-	}
-	return item.Key, item.Value, true
-}
-
-func (t *Tree) LastKeyValue() (UserKey, UserValue, bool) {
-	item, ok := <-t.Iter().Reverse()
-	if !ok {
-		return nil, nil, false
-	}
-	return item.Key, item.Value, true
-}
-
-func (t *Tree) AppendEntry(value Value) (uint32, uint32) {
-	memtable := t.ActiveMemtable.ReadLock()
-	defer memtable.Unlock()
-	return memtable.Insert(value)
-}
-
-func Recover(path Path, blockCache Arc[BlockCache], descriptorTable Arc[FileDescriptorTable]) (*Tree, error) {
-	log.Infof("Recovering LSM-tree at %s", path.String())
-
-	if bytes, err := os.ReadFile(path.Join(LSM_MARKER)); err != nil {
-		return nil, err
-	} else if version := ParseVersionHeader(bytes); version != VersionV0 {
-		return nil, fmt.Errorf("invalid version: %v", version)
-	}
-
-	levels := RecoverLevels(path, blockCache, descriptorTable)
-	levels.SortLevels()
-
-	configStr, err := os.ReadFile(path.Join(CONFIG_FILE))
+func (t *Tree) Get(key []byte) (value.UserValue, error) {
+	item, err := t.GetInternalEntry(key, true, nil)
 	if err != nil {
 		return nil, err
 	}
-	var config Config
-	if err := json.Unmarshal(configStr, &config); err != nil {
+	return item.Value, nil
+}
+
+func (t *Tree) Insert(key, val []byte, seqno value.SeqNo) (uint32, uint32, error) {
+	item := value.NewValue(key, val, seqno, value.Record)
+	a, b, c := t.AppendEntry(*item)
+	return *a, *b, c
+}
+
+func (t *Tree) Remove(key []byte, seqno value.SeqNo) (uint32, uint32, error) {
+	item := value.NewValue(key, nil, seqno, value.Tombstone)
+	a, b, c := t.AppendEntry(*item)
+	return *a, *b, c
+}
+
+func (t *Tree) ContainsKey(key []byte) (bool, error) {
+	item, err := t.Get(key)
+	if err != nil {
+		return false, err
+	}
+	return item != nil, nil
+}
+
+func (t *Tree) CreateIter(seqno *value.SeqNo) *ranger.Range {
+	return t.CreateRange(nil, nil, seqno)
+}
+
+// @TODO: wtf u doin implementing dis shit like this ?? its a map lmao
+func (t *Tree) Iter() *ranger.Range {
+	return t.CreateIter(nil)
+}
+
+func (t *Tree) CreateRange(lo, hi *segment.Bound[value.UserKey], seqno *value.SeqNo) *ranger.Range {
+	levels := t.TreeInner.Levels
+	// @TODO: add level lock
+	segmentArr := levels.GetAllSegmentsFlattened()
+	segments := []*segment.Segment{}
+	for _, v := range segmentArr {
+		if v.CheckKeyRangeOverlap(*lo, *hi) {
+			segments = append(segments, v)
+		}
+	}
+
+	return ranger.NewRange(
+		ranger.MemTableGuard{
+			Active: &ranger.RwLockGuard[memtable.MemTable]{Obj: t.TreeInner.ActiveMemtable},
+			Sealed: &ranger.RwLockGuard[map[string]*memtable.MemTable]{Obj: &t.TreeInner.SealedMemtables},
+		},
+		[2]segment.Bound[value.UserKey]{*lo, *hi},
+		segments,
+		*seqno,
+	)
+}
+
+func (t *Tree) Range(start, end []byte) *ranger.Range {
+	st := &segment.Bound[value.UserKey]{
+		Included: &start,
+	}
+
+	ed := &segment.Bound[value.UserKey]{
+		Included: &end,
+	}
+	return t.CreateRange(st, ed, nil)
+}
+
+func (t *Tree) CreatePrefix(pfix []byte, seqno *value.SeqNo) *prefix.Prefix {
+	levels := t.TreeInner.Levels
+	// @TODO: add level lock
+	segmentArr := levels.GetAllSegmentsFlattened()
+	segments := []*segment.Segment{}
+	for _, v := range segmentArr {
+		if v.CheckPrefixOverlap(pfix) {
+			segments = append(segments, v)
+		}
+	}
+	// segmentInfo := t.Levels.ReadLock().GetAllSegments().Filter(func(s *Segment) bool {
+	// 	return s.CheckPrefixOverlap(pfix)
+	// })
+	return prefix.NewPrefix(
+		ranger.MemTableGuard{
+			Active: &ranger.RwLockGuard[memtable.MemTable]{Obj: t.TreeInner.ActiveMemtable},
+			Sealed: &ranger.RwLockGuard[map[string]*memtable.MemTable]{Obj: &t.TreeInner.SealedMemtables},
+		},
+		pfix,
+		segments,
+		seqno,
+	)
+}
+
+func (t *Tree) Prefix(pfix []byte) *prefix.Prefix {
+	return t.CreatePrefix(pfix, nil)
+}
+
+func (t *Tree) FirstKeyValue() (value.UserKey, value.UserValue, bool) {
+	key, val, ok := t.Iter().IntoIter().Next()
+	if !ok {
+		return nil, nil, false
+	}
+	return *key, *val, true
+}
+
+func (t *Tree) LastKeyValue() (value.UserKey, value.UserValue, bool) {
+	key, val, ok := t.Iter().IntoIter().NextBack()
+	if !ok {
+		return nil, nil, false
+	}
+	return *key, *val, true
+}
+
+func (t *Tree) AppendEntry(value value.Value) (*uint32, *uint32, error) {
+	t.TreeInner.ActiveMutex.Lock()
+	defer t.TreeInner.ActiveMutex.Unlock()
+
+	itemSize, sizeAfter, err := t.TreeInner.ActiveMemtable.Insert(value)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &itemSize, &sizeAfter, nil
+}
+
+func Recover(path string, blockCache *segment.BlockCache, descriptorTable *descriptor.FileDescriptorTable) (*Tree, error) {
+	fmt.Printf("Recovering LSM-tree at %s", path)
+
+	if bytes, err := os.ReadFile(strings.Join([]string{path, file.LSMMarker}, "")); err != nil {
+		return nil, err
+	} else if vs := version.ParseFileHeader(bytes); vs != version.VersionV0 {
+		return nil, fmt.Errorf("invalid version: %v", vs)
+	}
+
+	lvl, err := RecoverLevels(path, blockCache, descriptorTable)
+	if err != nil {
+		return nil, err
+	}
+	lvl.SortLevels()
+
+	configStr, err := os.ReadFile(strings.Join([]string{path, file.ConfigFile}, ""))
+	if err != nil {
+		return nil, err
+	}
+	var cfg config.PersistedConfig
+	if err := json.Unmarshal(configStr, &cfg); err != nil {
 		return nil, err
 	}
 
 	inner := &TreeInner{
-		ActiveMemtable:  Arc[MemTable]{},
-		SealedMemtables: Arc[SealedMemtables]{},
-		Levels:          Arc[RWMutex[Levels]]{Value: levels},
-		OpenSnapshots:   SnapshotCounter{},
-		StopSignal:      StopSignal{},
-		Config:          config,
+		ActiveMemtable:  &memtable.MemTable{},
+		SealedMemtables: make(map[string]*memtable.MemTable),
+		Levels:          &levels.Levels{},
+		OpenSnapshots:   &SnapshotCounter{},
+		StopSignal:      &stop.StopSignal{},
+		Config:          &cfg,
 		BlockCache:      blockCache,
 		DescriptorTable: descriptorTable,
 	}
@@ -380,46 +452,48 @@ func Recover(path Path, blockCache Arc[BlockCache], descriptorTable Arc[FileDesc
 	return &Tree{TreeInner: inner}, nil
 }
 
-func CreateNew(config Config) (*Tree, error) {
+func CreateNew(config config.Config) (*Tree, error) {
 	path := config.Inner.Path
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return nil, err
 	}
 
-	markerPath := path.Join(LSM_MARKER)
-	if exists, _ := markerPath.Exists(); exists {
-		return nil, fmt.Errorf("marker file %s already exists", markerPath.String())
+	markerPath := strings.Join([]string{path, file.LSMMarker}, "")
+	if _, err := os.Stat(markerPath); err == nil {
+		return nil, fmt.Errorf("marker file %s already exists", markerPath)
 	}
 
-	if err := os.MkdirAll(path.Join(SEGMENTS_FOLDER), 0755); err != nil {
+	// 0755 is ---rwxr-x http://permissions-calculator.org/
+	// 0755 Commonly used on web servers. The owner can read, write, execute. Everyone else can read and execute but not modify the file.
+	if err := os.MkdirAll(strings.Join([]string{path, file.SegmentsFolder}, ""), 0755); err != nil {
 		return nil, err
 	}
 
+	// probably doesnt work, @TODO:
 	configStr, err := json.MarshalIndent(config.Inner, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path.Join(CONFIG_FILE), configStr, 0644); err != nil {
+
+	// 0644 Only the owner can read and write. Everyone else can only read. No one can execute the file.
+	if err := os.WriteFile(strings.Join([]string{path, file.ConfigFile}, ""), configStr, 0644); err != nil {
 		return nil, err
 	}
 
-	inner := CreateTreeInner(config)
+	inner, err := CreateNewTreeInner(&config)
+	if err != nil {
+		return nil, err
+	}
 
 	file, err := os.Create(markerPath)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := VersionV0.WriteHeader(file); err != nil {
+	if _, err := version.VersionV0.WriteFileHeader(file); err != nil {
 		return nil, err
 	}
+	// fsync here? @TODO: really?
 	if err := file.Sync(); err != nil {
-		return nil, err
-	}
-
-	if err := syncFolder(path.Join(SEGMENTS_FOLDER)); err != nil {
-		return nil, err
-	}
-	if err := syncFolder(path); err != nil {
 		return nil, err
 	}
 
@@ -427,7 +501,7 @@ func CreateNew(config Config) (*Tree, error) {
 }
 
 func (t *Tree) DiskSpace() uint64 {
-	segments := t.Levels.ReadLock().GetAllSegmentsFlattened()
+	segments := t.TreeInner.Levels.GetAllSegmentsFlattened()
 	var totalSize uint64
 	for _, segment := range segments {
 		totalSize += segment.Metadata.FileSize
@@ -435,9 +509,9 @@ func (t *Tree) DiskSpace() uint64 {
 	return totalSize
 }
 
-func (t *Tree) GetSegmentLSN() SeqNo {
-	segments := t.Levels.ReadLock().GetAllSegmentsFlattened()
-	var maxLSN SeqNo
+func (t *Tree) GetSegmentLSN() value.SeqNo {
+	segments := t.TreeInner.Levels.GetAllSegmentsFlattened()
+	var maxLSN value.SeqNo
 	for _, segment := range segments {
 		lsn := segment.GetLSN()
 		if lsn > maxLSN {
@@ -447,4 +521,71 @@ func (t *Tree) GetSegmentLSN() SeqNo {
 	return maxLSN
 }
 
-func (t *Tree) GetLSN() Se
+func (t *Tree) GetMemtableLSN() (*value.SeqNo, error) {
+	t.TreeInner.ActiveMutex.Lock()
+	defer t.TreeInner.ActiveMutex.Unlock()
+	return t.TreeInner.ActiveMemtable.GetLSN()
+}
+
+func RecoverLevels(treePath string, blockCache *segment.BlockCache, descriptorTable *descriptor.FileDescriptorTable) (*levels.Levels, error) {
+	fmt.Printf("Recovering disk segments from %s", treePath)
+
+	manifestPath := filepath.Join(treePath, file.LevelsManifestFile)
+
+	segmentIDsToRecover, err := (&levels.Levels{}).RecoverIds(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var segments []*segment.Segment
+
+	err = filepath.Walk(filepath.Join(treePath, file.SegmentsFolder), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			return nil
+		}
+
+		segmentID := filepath.Base(path)
+
+		fmt.Printf("Recovering segment from %s", path)
+
+		if slices.Contains(segmentIDsToRecover, segmentID) {
+			sg, err := segment.RecoverSegment(path, blockCache, descriptorTable)
+			if err != nil {
+				return err
+			}
+
+			descriptorTable.Insert(
+				filepath.Join(sg.Metadata.Path, file.BlocksFile),
+				sg.Metadata.ID,
+			)
+
+			segments = append(segments, sg)
+			fmt.Printf("Recovered segment from %s", path)
+		} else {
+			fmt.Printf("Deleting unfinished segment (not part of level manifest): %s", path)
+			err := os.RemoveAll(path)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(segments) < len(segmentIDsToRecover) {
+		fmt.Printf("Expected segments: %v", segmentIDsToRecover)
+		return nil, fmt.Errorf("some segments were not recovered")
+	}
+
+	fmt.Printf("Recovered %d segments", len(segments))
+
+	return (&levels.Levels{}).Recover(manifestPath, segments)
+}

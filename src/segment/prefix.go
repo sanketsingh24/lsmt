@@ -3,60 +3,61 @@ package segment
 import (
 	"bagh/descriptor"
 	"bagh/value"
+	"bytes"
 )
 
 type PrefixedReader struct {
-	descriptorTable *descriptor.FileDescriptorTable
-	blockIndex      *BlockIndex
+	DescriptorTable *descriptor.FileDescriptorTable
+	BlockIndex      *BlockIndex
 	blockCache      *BlockCache
-	segmentID       string
+	SegmentID       string
 
-	prefix value.UserKey
+	Prefix value.UserKey
 
 	iterator *Range
 }
 
 func NewPrefixedReader(
-	descriptorTable *descriptor.FileDescriptorTable,
-	segmentID string,
+	DescriptorTable *descriptor.FileDescriptorTable,
+	SegmentID string,
 	blockCache *BlockCache,
-	blockIndex *BlockIndex,
-	prefix value.UserKey,
+	BlockIndex *BlockIndex,
+	Prefix value.UserKey,
 ) *PrefixedReader {
 	return &PrefixedReader{
 		blockCache:      blockCache,
-		blockIndex:      blockIndex,
-		descriptorTable: descriptorTable,
-		segmentID:       segmentID,
+		BlockIndex:      BlockIndex,
+		DescriptorTable: DescriptorTable,
+		SegmentID:       SegmentID,
 		iterator:        nil,
-		prefix:          prefix,
+		Prefix:          Prefix,
 	}
 }
 
-func (pr *PrefixedReader) initialize() error {
-	upperBound, err := pr.blockIndex.GetPrefixUpperBound(pr.prefix)
+// @TODO: optimize lol
+func (pr *PrefixedReader) Initialize() error {
+	upperB, err := pr.BlockIndex.GetPrefixUpperBound(pr.Prefix)
 	if err != nil {
 		return err
 	}
 
-	var upperBoundBound Bound
-	var upperBoundKey value.UserKey
-	if upperBound != nil {
-		upperBoundBound = Excluded
-		upperBoundKey = upperBound.StartKey
+	var upperBound Bound[value.UserKey]
+	if upperB != nil {
+		upperBound.Excluded = &upperB.StartKey
 	} else {
-		upperBoundBound = Unbounded
+		upperBound.Unbounded = true
+	}
+	lowerBound := Bound[value.UserKey]{
+		Included: &pr.Prefix,
 	}
 
 	iterator := NewRange(
-		pr.descriptorTable,
-		pr.segmentID,
+		pr.DescriptorTable,
+		pr.SegmentID,
 		pr.blockCache,
-		pr.blockIndex,
-		Included,
-		pr.prefix,
-		upperBoundBound,
-		upperBoundKey,
+		pr.BlockIndex,
+		lowerBound,
+		upperBound,
 	)
 	pr.iterator = iterator
 
@@ -65,7 +66,7 @@ func (pr *PrefixedReader) initialize() error {
 
 func (pr *PrefixedReader) Next() (*value.Value, error) {
 	if pr.iterator == nil {
-		if err := pr.initialize(); err != nil {
+		if err := pr.Initialize(); err != nil {
 			return nil, err
 		}
 	}
@@ -79,11 +80,12 @@ func (pr *PrefixedReader) Next() (*value.Value, error) {
 			return nil, nil
 		}
 
-		if entry.Key.Less(pr.prefix) {
+		if bytes.Compare(entry.Key, pr.Prefix) == -1 {
 			continue
 		}
 
-		if !entry.Key.StartsWith(pr.prefix) {
+		if bytes.Compare(entry.Key, pr.Prefix) == 0 {
+			// @TODO: reached max keys what to do??? is this even correct?
 			return nil, nil
 		}
 
@@ -93,7 +95,7 @@ func (pr *PrefixedReader) Next() (*value.Value, error) {
 
 func (pr *PrefixedReader) NextBack() (*value.Value, error) {
 	if pr.iterator == nil {
-		if err := pr.initialize(); err != nil {
+		if err := pr.Initialize(); err != nil {
 			return nil, err
 		}
 	}
@@ -107,11 +109,11 @@ func (pr *PrefixedReader) NextBack() (*value.Value, error) {
 			return nil, nil
 		}
 
-		if entry.Key.Less(pr.prefix) {
+		if bytes.Compare(entry.Key, pr.Prefix) == -1 {
 			return nil, nil
 		}
 
-		if !entry.Key.StartsWith(pr.prefix) {
+		if bytes.Compare(entry.Key, pr.Prefix) == 0 {
 			continue
 		}
 

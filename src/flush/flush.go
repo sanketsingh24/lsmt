@@ -34,7 +34,7 @@ type Options struct {
 }
 
 // flushToSegment flushes a memtable, creating a segment in the given folder.
-func flushToSegment(opts Options) (*segment.Segment, error) {
+func FlushToSegment(opts Options) (*segment.Segment, error) {
 	segmentFolder := filepath.Join(opts.Folder, opts.SegmentID)
 	log.Printf("Flushing segment to %s", segmentFolder)
 
@@ -47,21 +47,21 @@ func flushToSegment(opts Options) (*segment.Segment, error) {
 		return nil, err
 	}
 
-	opts.MemTable.Items.Range(func(key value.ParsedInternalKey, value value.UserValue) bool {
-		err := segmentWriter.Write(segment.Value{
-			Key:   key,
-			Value: value,
+	for k, v := range opts.MemTable.Items {
+		err := segmentWriter.Write(value.Value{
+			Key:   []byte(k),
+			Value: v,
 		})
 		if err != nil {
 			return nil, err
 		}
-	})
+	}
 
 	if err := segmentWriter.Finish(); err != nil {
 		return nil, err
 	}
 
-	metadata, err := segment.NewMetadataFromWriter(opts.SegmentID, segmentWriter)
+	metadata, err := segment.MetadataFromWriter(opts.SegmentID, segmentWriter)
 	if err != nil {
 		return nil, err
 	}
@@ -70,8 +70,8 @@ func flushToSegment(opts Options) (*segment.Segment, error) {
 	}
 
 	log.Printf("Finalized segment write at %s", segmentFolder)
-
-	blockIndex, err := segment.NewBlockIndexFromFile(
+	blockIndex := new(segment.BlockIndex)
+	err = blockIndex.FromFile(
 		opts.SegmentID,
 		opts.DescriptorTable,
 		segmentFolder,

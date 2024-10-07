@@ -1,27 +1,21 @@
 package segment
 
 import (
-	. "bagh/value"
+	"bagh/value"
 	"bytes"
 	"encoding/binary"
 	"io"
 	"sort"
 )
 
-/// A reference to a block handle block on disk
-///
-/// Stores the block's position and size in bytes
-/// The start key is stored in the in-memory search tree, see [`TopLevelIndex`] below.
-///
-/// # Disk representation
-///
-/// \[offset; 8 bytes] - \[size; 4 bytes]
-//
-// NOTE: Yes the name is absolutely ridiculous, but it's not the
-// same as a regular BlockHandle (to a data block), because the
-// start key is not required (it's already in the index, see below)
-
-// BlockHandleBlockHandle is a reference to a block handle block on disk
+// / A reference to a block handle block on disk
+// /
+// / Stores the block's position and size in bytes
+// / The start key is stored in the in-memory search tree, see [`TopLevelIndex`] below.
+// /
+// / # Disk representation
+// /
+// / \[offset; 8 bytes] - \[size; 4 bytes]
 type BlockHandleBlockHandle struct {
 	Offset uint64
 	Size   uint32
@@ -50,7 +44,7 @@ func NewTopLevelIndex(data map[string]*BlockHandleBlockHandle) *TopLevelIndex {
 	return &TopLevelIndex{Data: data}
 }
 
-func (tli *TopLevelIndex) GetPrefixUpperBound(prefix []byte) (UserKey, *BlockHandleBlockHandle, bool) {
+func (tli *TopLevelIndex) GetPrefixUpperBound(prefix []byte) (value.UserKey, *BlockHandleBlockHandle, bool) {
 	var keys []string
 	for key := range tli.Data {
 		keys = append(keys, key)
@@ -60,13 +54,13 @@ func (tli *TopLevelIndex) GetPrefixUpperBound(prefix []byte) (UserKey, *BlockHan
 	for _, key := range keys {
 		if !bytes.HasPrefix([]byte(key), prefix) {
 			bh := tli.Data[key]
-			return UserKey(key), bh, true
+			return value.UserKey(key), bh, true
 		}
 	}
 	return nil, nil, false
 }
 
-func (tli *TopLevelIndex) GetBlockContainingItem(key []byte) (UserKey, *BlockHandleBlockHandle, bool) {
+func (tli *TopLevelIndex) GetBlockContainingItem(key []byte) (value.UserKey, *BlockHandleBlockHandle, bool) {
 	var keys []string
 	for k := range tli.Data {
 		keys = append(keys, k)
@@ -76,13 +70,13 @@ func (tli *TopLevelIndex) GetBlockContainingItem(key []byte) (UserKey, *BlockHan
 	for i := len(keys) - 1; i >= 0; i-- {
 		if bytes.Compare([]byte(keys[i]), key) <= 0 {
 			bh := tli.Data[keys[i]]
-			return UserKey(keys[i]), bh, true
+			return value.UserKey(keys[i]), bh, true
 		}
 	}
 	return nil, nil, false
 }
 
-func (tli *TopLevelIndex) GetFirstBlockHandle() (UserKey, *BlockHandleBlockHandle) {
+func (tli *TopLevelIndex) GetFirstBlockHandle() (value.UserKey, *BlockHandleBlockHandle) {
 	var minKey string
 	for key := range tli.Data {
 		if minKey == "" || key < minKey {
@@ -90,10 +84,10 @@ func (tli *TopLevelIndex) GetFirstBlockHandle() (UserKey, *BlockHandleBlockHandl
 		}
 	}
 	bh := tli.Data[minKey]
-	return UserKey(minKey), bh
+	return value.UserKey(minKey), bh
 }
 
-func (tli *TopLevelIndex) GetLastBlockHandle() (UserKey, *BlockHandleBlockHandle) {
+func (tli *TopLevelIndex) GetLastBlockHandle() (value.UserKey, *BlockHandleBlockHandle) {
 	var maxKey string
 	for key := range tli.Data {
 		if maxKey == "" || key > maxKey {
@@ -101,10 +95,10 @@ func (tli *TopLevelIndex) GetLastBlockHandle() (UserKey, *BlockHandleBlockHandle
 		}
 	}
 	bh := tli.Data[maxKey]
-	return UserKey(maxKey), bh
+	return value.UserKey(maxKey), bh
 }
 
-func (tli *TopLevelIndex) GetPreviousBlockHandle(key []byte) (UserKey, *BlockHandleBlockHandle, bool) {
+func (tli *TopLevelIndex) GetPreviousBlockHandle(key []byte) (value.UserKey, *BlockHandleBlockHandle, bool) {
 	var keys []string
 	for k := range tli.Data {
 		keys = append(keys, k)
@@ -114,13 +108,13 @@ func (tli *TopLevelIndex) GetPreviousBlockHandle(key []byte) (UserKey, *BlockHan
 	for i := len(keys) - 1; i >= 0; i-- {
 		if bytes.Compare([]byte(keys[i]), key) < 0 {
 			bh := tli.Data[keys[i]]
-			return UserKey(keys[i]), bh, true
+			return value.UserKey(keys[i]), bh, true
 		}
 	}
 	return nil, nil, false
 }
 
-func (tli *TopLevelIndex) GetNextBlockHandle(key []byte) (UserKey, *BlockHandleBlockHandle, bool) {
+func (tli *TopLevelIndex) GetNextBlockHandle(key []byte) (value.UserKey, *BlockHandleBlockHandle, bool) {
 	var keys []string
 	for k := range tli.Data {
 		keys = append(keys, k)
@@ -130,7 +124,7 @@ func (tli *TopLevelIndex) GetNextBlockHandle(key []byte) (UserKey, *BlockHandleB
 	for _, k := range keys {
 		if bytes.Compare([]byte(k), key) > 0 {
 			bh := tli.Data[k]
-			return UserKey(k), bh, true
+			return value.UserKey(k), bh, true
 		}
 	}
 	return nil, nil, false

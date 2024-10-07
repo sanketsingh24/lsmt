@@ -1,7 +1,7 @@
 package segment
 
 import (
-	value "bagh/value"
+	"bagh/value"
 	"bytes"
 	"hash/fnv"
 	"sync"

@@ -32,22 +32,22 @@ func (Version) Len() uint8 {
 	return 5
 }
 
-func ParseFileHeader(bytes []byte) (Version, bool) {
+func ParseFileHeader(bytes []byte) Version {
 	if len(bytes) < 5 {
-		return 0, false
+		return 0
 	}
 
 	if slices.Compare(bytes[:3], MagicBytes) != 0 {
-		return 0, false
+		return 0
 	}
 
 	value := binary.BigEndian.Uint16(bytes[3:5])
 	version, err := VersionFromU16(value)
 	if err != nil {
-		return 0, false
+		return 0
 	}
 
-	return version, true
+	return version
 }
 
 func (v Version) WriteFileHeader(writer io.Writer) (int, error) {

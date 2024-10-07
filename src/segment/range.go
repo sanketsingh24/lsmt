@@ -2,112 +2,121 @@ package segment
 
 import (
 	"bagh/descriptor"
-	value "bagh/value"
+	"bagh/value"
 	"bytes"
 )
 
-type Bound int
+// type Bound int
 
-const (
-	Unbounded Bound = iota
-	Included
-	Excluded
-)
+// const (
+// 	Unbounded Bound = iota
+// 	Included
+// 	Excluded
+// )
 
-type BoundedKey struct {
-	Key  value.UserKey
-	Type Bound
+// @TODO: modify to this
+// type Bound[T any] struct {
+// }
+
+type Bound[T any] struct {
+	Included  *T
+	Excluded  *T
+	Unbounded bool
 }
 
 type Range struct {
-	descriptorTable *descriptor.FileDescriptorTable
-	blockIndex      *BlockIndex
-	blockCache      *BlockCache
-	segmentID       string
+	DescriptorTable *descriptor.FileDescriptorTable
+	BlockIndex      *BlockIndex
+	BlockCache      *BlockCache
+	SegmentID       string
 
-	rangeBounds struct {
-		start BoundedKey
-		end   BoundedKey
-	}
+	Start Bound[value.UserKey]
+	End   Bound[value.UserKey]
 
-	iterator *Reader
+	Iterator *Reader
 }
 
 func NewRange(
-	descriptorTable *descriptor.FileDescriptorTable,
-	segmentID string,
-	blockCache *BlockCache,
-	blockIndex *BlockIndex,
-	start BoundedKey,
-	end BoundedKey,
+	DescriptorTable *descriptor.FileDescriptorTable,
+	SegmentID string,
+	BlockCache *BlockCache,
+	BlockIndex *BlockIndex,
+	start Bound[value.UserKey],
+	end Bound[value.UserKey],
 ) *Range {
 	return &Range{
-		descriptorTable: descriptorTable,
-		blockCache:      blockCache,
-		blockIndex:      blockIndex,
-		segmentID:       segmentID,
-		rangeBounds: struct {
-			start BoundedKey
-			end   BoundedKey
-		}{
-			start: start,
-			end:   end,
-		},
-		iterator: nil,
+		DescriptorTable: DescriptorTable,
+		BlockCache:      BlockCache,
+		BlockIndex:      BlockIndex,
+		SegmentID:       SegmentID,
+		Start:           start,
+		End:             end,
+		Iterator:        nil,
 	}
 }
 
+// @TODO: idk if this works
 func (r *Range) initialize() error {
-	var offsetLo, offsetHi *value.UserKey
+	var offsetLo, offsetHi value.UserKey
 
-	switch r.rangeBounds.start.Type {
-	case Unbounded:
-		offsetLo = nil
-	case Included, Excluded:
-		info, err := r.blockIndex.GetLowerBoundBlockInfo(r.rangeBounds.start.Key)
-		if err != nil {
-			return err
+	if !r.Start.Unbounded {
+		var startKey *value.UserKey
+		if r.Start.Included != nil {
+			startKey = r.Start.Included
+		} else if r.Start.Excluded != nil {
+			startKey = r.Start.Excluded
 		}
-		if info != nil {
-			offsetLo = &info.StartKey
+		if startKey != nil {
+			blockInfo, err := r.BlockIndex.GetLowerBoundBlockInfo(*startKey)
+			if err != nil {
+				return err
+			}
+			if blockInfo != nil {
+				offsetLo = blockInfo.StartKey
+			}
 		}
 	}
 
-	switch r.rangeBounds.end.Type {
-	case Unbounded:
-		offsetHi = nil
-	case Included, Excluded:
-		info, err := r.blockIndex.GetUpperBoundBlockInfo(r.rangeBounds.end.Key)
-		if err != nil {
-			return err
+	if !r.End.Unbounded {
+		var endKey *value.UserKey
+		if r.End.Included != nil {
+			endKey = r.End.Included
+		} else if r.End.Excluded != nil {
+			endKey = r.End.Excluded
 		}
-		if info != nil {
-			offsetHi = &info.StartKey
+		if endKey != nil {
+			blockInfo, err := r.BlockIndex.GetUpperBoundBlockInfo(*endKey)
+			if err != nil {
+				return err
+			}
+			if blockInfo != nil {
+				offsetHi = blockInfo.StartKey
+			}
 		}
 	}
 
 	reader := NewReader(
-		r.descriptorTable,
-		r.segmentID,
-		r.blockCache,
-		r.blockIndex,
+		r.DescriptorTable,
+		r.SegmentID,
+		r.BlockCache,
+		r.BlockIndex,
 		offsetLo,
 		offsetHi,
 	)
-	r.iterator = reader
+	r.Iterator = reader
 
 	return nil
 }
 
 func (r *Range) Next() (*value.Value, error) {
-	if r.iterator == nil {
+	if r.Iterator == nil {
 		if err := r.initialize(); err != nil {
 			return nil, err
 		}
 	}
 
 	for {
-		entry, err := r.iterator.Next()
+		entry, err := r.Iterator.Next()
 		if err != nil {
 			return nil, err
 		}
@@ -115,25 +124,31 @@ func (r *Range) Next() (*value.Value, error) {
 			return nil, nil
 		}
 
-		switch r.rangeBounds.start.Type {
-		case Included:
-			if bytes.Compare(entry.Key, r.rangeBounds.start.Key) < 0 {
-				continue
-			}
-		case Excluded:
-			if bytes.Compare(entry.Key, r.rangeBounds.start.Key) <= 0 {
-				continue
+		if !r.Start.Unbounded {
+			if r.Start.Included != nil {
+				if bytes.Compare(entry.Key, *r.Start.Included) < 0 {
+					// Before min key
+					continue
+				}
+			} else if r.Start.Excluded != nil {
+				if bytes.Compare(entry.Key, *r.Start.Excluded) <= 0 {
+					// Before or equal min key
+					continue
+				}
 			}
 		}
 
-		switch r.rangeBounds.end.Type {
-		case Included:
-			if bytes.Compare(entry.Key, r.rangeBounds.end.Key) > 0 {
-				return nil, nil
-			}
-		case Excluded:
-			if bytes.Compare(entry.Key, r.rangeBounds.end.Key) >= 0 {
-				return nil, nil
+		if !r.End.Unbounded {
+			if r.End.Included != nil {
+				if bytes.Compare(entry.Key, *r.Start.Included) > 0 {
+					// After max key
+					return nil, nil
+				}
+			} else if r.End.Excluded != nil {
+				if bytes.Compare(entry.Key, *r.Start.Excluded) >= 0 {
+					// Reached max key
+					return nil, nil
+				}
 			}
 		}
 
@@ -142,14 +157,14 @@ func (r *Range) Next() (*value.Value, error) {
 }
 
 func (r *Range) NextBack() (*value.Value, error) {
-	if r.iterator == nil {
+	if r.Iterator == nil {
 		if err := r.initialize(); err != nil {
 			return nil, err
 		}
 	}
 
 	for {
-		entry, err := r.iterator.NextBack()
+		entry, err := r.Iterator.NextBack()
 		if err != nil {
 			return nil, err
 		}
@@ -157,25 +172,31 @@ func (r *Range) NextBack() (*value.Value, error) {
 			return nil, nil
 		}
 
-		switch r.rangeBounds.start.Type {
-		case Included:
-			if bytes.Compare(entry.Key, r.rangeBounds.start.Key) < 0 {
-				return nil, nil
-			}
-		case Excluded:
-			if bytes.Compare(entry.Key, r.rangeBounds.start.Key) <= 0 {
-				return nil, nil
+		if !r.Start.Unbounded {
+			if r.Start.Included != nil {
+				if bytes.Compare(entry.Key, *r.Start.Included) < 0 {
+					// Reached min key
+					return nil, nil
+				}
+			} else if r.Start.Excluded != nil {
+				if bytes.Compare(entry.Key, *r.Start.Excluded) <= 0 {
+					// Before min key
+					return nil, nil
+				}
 			}
 		}
 
-		switch r.rangeBounds.end.Type {
-		case Included:
-			if bytes.Compare(entry.Key, r.rangeBounds.end.Key) > 0 {
-				continue
-			}
-		case Excluded:
-			if bytes.Compare(entry.Key, r.rangeBounds.end.Key) >= 0 {
-				continue
+		if !r.End.Unbounded {
+			if r.End.Included != nil {
+				if bytes.Compare(entry.Key, *r.Start.Included) > 0 {
+					// After max key
+					continue
+				}
+			} else if r.End.Excluded != nil {
+				if bytes.Compare(entry.Key, *r.Start.Excluded) >= 0 {
+					// After or equal max key
+					continue
+				}
 			}
 		}
 

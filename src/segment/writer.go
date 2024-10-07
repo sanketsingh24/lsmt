@@ -1,12 +1,16 @@
 package segment
 
 import (
-	value "bagh/value"
+	"bagh/file"
+	"bagh/id"
+	"bagh/value"
 	"bufio"
 	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/pierrec/lz4/v4"
 )
 
 type MultiWriter struct {
@@ -19,21 +23,22 @@ type MultiWriter struct {
 
 type Writer struct {
 	Opts             Options
-	BlockWriter      *bufio.Writer
+	BlockWriter      *bufio.Writer // writes os.file
 	IndexWriter      IndexWriter
 	Chunk            ValueBlock
+	BlockFile        *os.File
 	BlockCount       int
 	ItemCount        int
 	FilePos          uint64
 	UncompressedSize uint64
-	FirstKey         *value.UserKey
-	LastKey          *value.UserKey
+	FirstKey         value.UserKey
+	LastKey          value.UserKey
 	TombstoneCount   int
 	ChunkSize        int
 	LowestSeqNo      value.SeqNo
 	HighestSeqNo     value.SeqNo
 	KeyCount         int
-	CurrentKey       *value.UserKey
+	CurrentKey       value.UserKey
 }
 
 type Options struct {
@@ -43,7 +48,7 @@ type Options struct {
 }
 
 func NewMultiWriter(targetSize uint64, opts Options) (*MultiWriter, error) {
-	segmentID := generateSegmentID()
+	segmentID := id.GenerateSegmentID()
 
 	writer, err := NewWriter(Options{
 		Path:            filepath.Join(opts.Path, segmentID),
@@ -69,7 +74,7 @@ func (mw *MultiWriter) Rotate() error {
 		return err
 	}
 
-	newSegmentID := generateSegmentID()
+	newSegmentID := id.GenerateSegmentID()
 
 	newWriter, err := NewWriter(Options{
 		Path:            filepath.Join(mw.Opts.Path, newSegmentID),
@@ -86,17 +91,17 @@ func (mw *MultiWriter) Rotate() error {
 	mw.CurrentSegmentID = newSegmentID
 
 	if oldWriter.ItemCount > 0 {
-		metadata, err := MetadataFromWriter(oldSegmentID, oldWriter)
+		metadata, err := MetadataFromWriter(oldSegmentID, &oldWriter)
 		if err != nil {
 			return err
 		}
-		mw.CreatedItems = append(mw.CreatedItems, metadata)
+		mw.CreatedItems = append(mw.CreatedItems, *metadata)
 	}
 
 	return nil
 }
 
-func (mw *MultiWriter) Write(item Value) error {
+func (mw *MultiWriter) Write(item value.Value) error {
 	if err := mw.Writer.Write(item); err != nil {
 		return err
 	}
@@ -116,11 +121,11 @@ func (mw *MultiWriter) Finish() ([]Metadata, error) {
 	}
 
 	if mw.Writer.ItemCount > 0 {
-		metadata, err := MetadataFromWriter(mw.CurrentSegmentID, mw.Writer)
+		metadata, err := MetadataFromWriter(mw.CurrentSegmentID, &mw.Writer)
 		if err != nil {
 			return nil, err
 		}
-		mw.CreatedItems = append(mw.CreatedItems, metadata)
+		mw.CreatedItems = append(mw.CreatedItems, *metadata)
 	}
 
 	return mw.CreatedItems, nil
@@ -131,7 +136,7 @@ func NewWriter(opts Options) (*Writer, error) {
 		return nil, err
 	}
 
-	blockFile, err := os.Create(filepath.Join(opts.Path, BLOCKS_FILE))
+	blockFile, err := os.Create(filepath.Join(opts.Path, file.BlocksFile))
 	if err != nil {
 		return nil, err
 	}
@@ -142,18 +147,17 @@ func NewWriter(opts Options) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	chunk := ValueBlock{
-		Items: make([]Value, 0, 1000),
-		CRC:   0,
-	}
+	chunk := new(ValueBlock)
+	chunk.Items = make([]value.Value, 0, 1000)
+	chunk.CRC = 0
 
 	return &Writer{
 		Opts:         opts,
 		BlockWriter:  blockWriter,
 		IndexWriter:  *indexWriter,
-		Chunk:        chunk,
-		LowestSeqNo:  SeqNo(^uint64(0)), // MAX value
+		Chunk:        *chunk,
+		BlockFile:    blockFile,
+		LowestSeqNo:  value.SeqNo(^uint64(0)), // MAX value
 		HighestSeqNo: 0,
 	}, nil
 }
@@ -171,23 +175,28 @@ func (w *Writer) WriteBlock() error {
 	w.UncompressedSize += uncompressedChunkSize
 
 	// Serialize block
-	bytes, err := w.Chunk.Serialize()
+	// @TODO: do these even work?
+	buf := new(bytes.Buffer)
+	err := w.Chunk.Serialize(buf)
 	if err != nil {
 		return err
 	}
 
 	// Compress using LZ4
-	compressedBytes := compressPrependSize(bytes)
+	compressor := new(lz4.Compressor)
+	compressedBytes := make([]byte, 0)
+	bytesWritten, err := compressor.CompressBlock(buf.Bytes(), compressedBytes)
+	if err != nil {
+		return err
+	}
 
 	// Write to file
 	if _, err := w.BlockWriter.Write(compressedBytes); err != nil {
 		return err
 	}
 
-	bytesWritten := uint32(len(compressedBytes))
-
 	firstItem := w.Chunk.Items[0]
-	if err := w.IndexWriter.RegisterBlock(firstItem.Key, w.FilePos, bytesWritten); err != nil {
+	if err := w.IndexWriter.RegisterBlock(firstItem.Key, w.FilePos, uint32(bytesWritten)); err != nil {
 		return err
 	}
 
@@ -200,7 +209,7 @@ func (w *Writer) WriteBlock() error {
 	return nil
 }
 
-func (w *Writer) Write(item Value) error {
+func (w *Writer) Write(item value.Value) error {
 	if item.IsTombstone() {
 		if w.Opts.EvictTombstones {
 			return nil
@@ -228,9 +237,9 @@ func (w *Writer) Write(item Value) error {
 	}
 
 	if w.FirstKey == nil {
-		w.FirstKey = &itemKey
+		w.FirstKey = itemKey
 	}
-	w.LastKey = &itemKey
+	w.LastKey = itemKey
 
 	if w.LowestSeqNo > seqno {
 		w.LowestSeqNo = seqno
@@ -257,18 +266,18 @@ func (w *Writer) Finish() error {
 		return nil
 	}
 
+	// First, flush the data blocks
 	if err := w.BlockWriter.Flush(); err != nil {
 		return err
 	}
 
+	// Append index blocks to file
 	if err := w.IndexWriter.Finish(w.FilePos); err != nil {
 		return err
 	}
-
-	if f, ok := w.BlockWriter.Writer.(*os.File); ok {
-		if err := f.Sync(); err != nil {
-			return err
-		}
+	// Then fsync the blocks file
+	if err := w.BlockFile.Sync(); err != nil {
+		return err
 	}
 
 	return nil

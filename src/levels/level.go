@@ -1,6 +1,9 @@
 package levels
 
-import "bagh/value"
+import (
+	"bagh/segment"
+	"bagh/value"
+)
 
 type Level struct {
 	Segments []string
@@ -21,19 +24,19 @@ func NewLevel() *Level {
 }
 
 type ResolvedLevel struct {
-	Segments []Segment
+	Segments []segment.Segment
 }
 
-func (r *ResolvedLevel) Deref() []Segment {
+func (r *ResolvedLevel) Deref() []segment.Segment {
 	return r.Segments
 }
 
-func (r *ResolvedLevel) DerefMut() []Segment {
+func (r *ResolvedLevel) DerefMut() []segment.Segment {
 	return r.Segments
 }
 
-func NewResolvedLevel(level *Level, hiddenSet *HiddenSet, segmentMap map[string]*Segment) *ResolvedLevel {
-	var newLevel []Segment
+func NewResolvedLevel(level *Level, hiddenSet *HiddenSet, segmentMap map[string]*segment.Segment) *ResolvedLevel {
+	var newLevel []segment.Segment
 	for _, segmentID := range level.Segments {
 		if !hiddenSet.Contains(segmentID) {
 			segment, ok := segmentMap[segmentID]
@@ -51,16 +54,23 @@ func NewResolvedLevel(level *Level, hiddenSet *HiddenSet, segmentMap map[string]
 func (r *ResolvedLevel) Size() int64 {
 	var totalSize int64
 	for _, segment := range r.Segments {
-		totalSize += segment.FileSize
+		totalSize += int64(segment.Metadata.FileSize)
 	}
 	return totalSize
 }
 
 func (r *ResolvedLevel) GetOverlappingSegments(start, end value.UserKey) []string {
 	var overlappingSegments []string
-	for _, segment := range r.Segments {
-		if segment.CheckKeyRangeOverlap(start, end) {
-			overlappingSegments = append(overlappingSegments, segment.ID)
+	st := segment.Bound[value.UserKey]{
+		Included: &start,
+	}
+	ed := segment.Bound[value.UserKey]{
+		Included: &end,
+	}
+
+	for _, seg := range r.Segments {
+		if seg.CheckKeyRangeOverlap(st, ed) {
+			overlappingSegments = append(overlappingSegments, seg.Metadata.ID)
 		}
 	}
 	return overlappingSegments

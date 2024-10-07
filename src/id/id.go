@@ -31,7 +31,7 @@ func toBase36(x uint32) string {
 }
 
 // generateSegmentID generates a unique segment ID similar to Cassandra SSTable identifiers.
-func generateSegmentID() string {
+func GenerateSegmentID() string {
 	now := time.Now().UTC()
 
 	year := now.Year()

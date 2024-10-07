@@ -1,12 +1,13 @@
-package treeinner
+package tree
 
 import (
 	"bagh/config"
 	"bagh/descriptor"
 	"bagh/file"
+	"bagh/levels"
 	"bagh/memtable"
 	"bagh/segment"
-	"bagh/snapshot"
+	"bagh/stop"
 	"log"
 	"path/filepath"
 	"sync"
@@ -17,20 +18,21 @@ import (
 
 type TreeInner struct {
 	ActiveMemtable  *memtable.MemTable
-	SealedMemtables *sync.Map
-	Levels          *Levels
-	Config          *PersistedConfig
+	SealedMemtables map[string]*memtable.MemTable
+	Levels          *levels.Levels
+	Config          *config.PersistedConfig
 	BlockCache      *segment.BlockCache
 	DescriptorTable *descriptor.FileDescriptorTable
-	OpenSnapshots   *snapshot.SnapshotCounter
-	StopSignal      *StopSignal
+	OpenSnapshots   *SnapshotCounter
+	StopSignal      *stop.StopSignal
 
 	ActiveMutex sync.RWMutex
+	SealedMutex sync.RWMutex
 	LevelsMutex sync.RWMutex
 }
 
 func CreateNewTreeInner(config *config.Config) (*TreeInner, error) {
-	levels, err := CreateNewLevels(
+	levels, err := levels.NewLevels(
 		config.Inner.LevelCount,
 		filepath.Join(config.Inner.Path, file.LevelsManifestFile),
 	)
@@ -39,21 +41,21 @@ func CreateNewTreeInner(config *config.Config) (*TreeInner, error) {
 	}
 
 	return &TreeInner{
-		activeMemtable:  memtable.NewMemTable(),
-		sealedMemtables: &sync.Map{},
-		levels:          levels,
-		config:          config.Inner,
-		blockCache:      config.BlockCache,
-		descriptorTable: config.DescriptorTable,
-		openSnapshots:   snapshot.NewSnapshotCounter(),
-		stopSignal:      NewStopSignal(),
+		ActiveMemtable:  memtable.NewMemTable(),
+		SealedMemtables: *new(map[string]*memtable.MemTable),
+		Levels:          levels,
+		Config:          config.Inner,
+		BlockCache:      config.BlockCache,
+		DescriptorTable: config.DescriptorTable,
+		OpenSnapshots:   NewSnapshotCounter(),
+		StopSignal:      stop.NewStopSignal(),
 	}, nil
 }
 
 func (t *TreeInner) Drop() {
 	log.Println("Dropping TreeInner")
 	log.Println("Sending stop signal to compactors")
-	t.stopSignal.Send()
+	t.StopSignal.Send()
 }
 
 // func main() {

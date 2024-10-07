@@ -1,7 +1,6 @@
 package value
 
 import (
-	. "bagh/serde"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -54,9 +53,9 @@ func (v ValueType) ToByte() byte {
 
 // Key for skiplist and memtable
 type ParsedInternalKey struct {
-	UserKey   UserKey
-	SeqNo     SeqNo
-	ValueType ValueType
+	UserKey   UserKey   `json:"user_key"`
+	SeqNo     SeqNo     `json:"seq_no"`
+	ValueType ValueType `json:"value_type"`
 }
 
 func NewParsedInternalKey(userKey *UserKey, valueType ValueType, seqno SeqNo) *ParsedInternalKey {
@@ -101,56 +100,72 @@ type Value struct {
 	///
 	/// Supports up to 2^32 bytes
 	Value UserValue
-	// @P2
+	// @P2 well I added seqno after some time so it is missing in manyplaces, pls filll @TODO:
 	SeqNo SeqNo
 	/// Tombstone marker
 	ValueType ValueType
 }
 
 func (v Value) Serialize(writer io.Writer) error {
-	if err := binary.Write(writer, binary.BigEndian, uint8(v.ValueType)); err != nil {
-		return NewSerializeError(err)
-	}
-	if err := binary.Write(writer, binary.BigEndian, uint16(len(v.Key))); err != nil {
-		return NewSerializeError(err)
+	// if err := binary.Write(writer, binary.BigEndian, uint8(v.ValueType)); err != nil {
+	// 	return NewSerializeError(err)
+	// }
+	// if err := binary.Write(writer, binary.BigEndian, uint16(len(v.Key))); err != nil {
+	// 	return NewSerializeError(err)
+	// }
+	// if _, err := writer.Write(v.Key); err != nil {
+	// 	return NewSerializeError(err)
+	// }
+	// if err := binary.Write(writer, binary.BigEndian, uint32(len(v.Value))); err != nil {
+	// 	return NewSerializeError(err)
+	// }
+	// if _, err := writer.Write(v.Value); err != nil {
+	// 	return NewSerializeError(err)
+	// }
+
+	if err := binary.Write(writer, binary.BigEndian, int32(len(v.Key))); err != nil {
+		return err
 	}
 	if _, err := writer.Write(v.Key); err != nil {
-		return NewSerializeError(err)
+		return err
 	}
-	if err := binary.Write(writer, binary.BigEndian, uint32(len(v.Value))); err != nil {
-		return NewSerializeError(err)
+	if err := binary.Write(writer, binary.BigEndian, int32(len(v.Value))); err != nil {
+		return err
 	}
 	if _, err := writer.Write(v.Value); err != nil {
-		return NewSerializeError(err)
+		return err
+	}
+	if err := binary.Write(writer, binary.BigEndian, v.SeqNo); err != nil {
+		return err
 	}
 	return nil
 }
 
 func (v Value) Deserialize(reader io.Reader) error {
+	var length int32
+	if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
+		return err
+	}
+	v.Key = make([]byte, length)
+	if _, err := io.ReadFull(reader, v.Key); err != nil {
+		return err
+	}
+	if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
+		return err
+	}
+	v.Value = make([]byte, length)
+	if _, err := io.ReadFull(reader, v.Value); err != nil {
+		return err
+	}
+	if err := binary.Read(reader, binary.BigEndian, &v.SeqNo); err != nil {
+		return err
+	}
+
 	var valueType uint8
 	if err := binary.Read(reader, binary.BigEndian, &valueType); err != nil {
-		return NewUTF8DeserializeError(err)
+		return err
 	}
 	v.ValueType = ValueType(valueType)
-
-	var keyLen uint16
-	if err := binary.Read(reader, binary.BigEndian, &keyLen); err != nil {
-		return NewDeserializeError(err)
-	}
-	v.Key = make([]byte, keyLen)
-	if _, err := io.ReadFull(reader, v.Key); err != nil {
-		return NewDeserializeError(err)
-	}
-
-	var valueLen uint32
-	if err := binary.Read(reader, binary.BigEndian, &valueLen); err != nil {
-		return NewDeserializeError(err)
-	}
-	v.Value = make([]byte, valueLen)
-	if _, err := io.ReadFull(reader, v.Value); err != nil {
-		return NewDeserializeError(err)
-	}
-
 	return nil
 }
 
@@ -159,11 +174,12 @@ func (v Value) Clone() SerDeClone {
 		Key:       append([]byte(nil), v.Key...),
 		Value:     append([]byte(nil), v.Value...),
 		ValueType: v.ValueType,
+		SeqNo:     v.SeqNo,
 	}
 }
 
 // NewValue creates a new Value instance.
-func NewValue(key UserKey, value UserValue, valueType ValueType) *Value {
+func NewValue(key UserKey, value UserValue, seqno SeqNo, valueType ValueType) *Value {
 	if len(key) == 0 || len(key) > math.MaxUint16 {
 		panic("invalid key length")
 	}
@@ -173,6 +189,7 @@ func NewValue(key UserKey, value UserValue, valueType ValueType) *Value {
 	return &Value{
 		Key:       key,
 		Value:     value,
+		SeqNo:     seqno,
 		ValueType: valueType,
 	}
 }
@@ -212,7 +229,10 @@ func (v Value) String() string {
 
 // Sorting interface for Value. Sort by key and then by sequence number.
 func (v Value) Less(other Value) bool {
-	return bytes.Compare(v.Key, other.Key) < 0
+	if cmp := bytes.Compare(v.Key, other.Key); cmp != 0 {
+		return cmp < 0
+	}
+	return v.SeqNo > other.SeqNo
 }
 
 // ValueFromParsedInternalKeyAndUserValue creates a Value from a ParsedInternalKey and UserValue

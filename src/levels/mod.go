@@ -55,13 +55,13 @@ func NewLevels(levelCount uint8, path string) (*Levels, error) {
 		HiddenSet: &HiddenSet{Set: make(map[string]struct{}, 10)},
 		// segmentHistory: NewSegmentHistoryWriter(),
 	}
-	if err := l.writeToDisk(); err != nil {
+	if err := l.WriteToDisk(); err != nil {
 		return nil, err
 	}
-
-	if err := l.writeSegmentHistoryEntry("create_new"); err != nil {
-		return nil, err
-	}
+	// @p2
+	// if err := l.writeSegmentHistoryEntry("create_new"); err != nil {
+	// 	return nil, err
+	// }
 
 	return l, nil
 }
@@ -134,7 +134,7 @@ func (l *Levels) WriteToDisk() error {
 }
 
 func (l *Levels) Add(segment *segment.Segment) {
-	l.insertIntoLevel(0, segment)
+	l.InsertIntoLevel(0, segment)
 }
 
 func (l *Levels) SortLevels() {
@@ -142,14 +142,14 @@ func (l *Levels) SortLevels() {
 		sort.Slice(level.Segments, func(i, j int) bool {
 			segA := l.Segments[level.Segments[i]]
 			segB := l.Segments[level.Segments[j]]
-			return segB.Metadata.Seqnos.Second > segA.Metadata.Seqnos.Second
+			return segB.Metadata.Seqnos[1] > segA.Metadata.Seqnos[1]
 		})
 	}
 }
 
 func (l *Levels) InsertIntoLevel(levelNo uint8, segment *segment.Segment) {
 	lastLevelIndex := len(l.Levels) - 1
-	index := int(levelNo.Clamp(0, uint8(lastLevelIndex)))
+	index := int(clamp(levelNo, 0, uint8(lastLevelIndex)))
 
 	level := l.Levels[index]
 	level.Segments = append(level.Segments, segment.Metadata.ID)
@@ -160,6 +160,16 @@ func (l *Levels) InsertIntoLevel(levelNo uint8, segment *segment.Segment) {
 	// if err := l.writeSegmentHistoryEntry("insert"); err != nil {
 	// 	// Log the error and continue
 	// }
+}
+
+func clamp(value, min, max uint8) uint8 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func (l *Levels) Remove(segmentID string) {
@@ -203,9 +213,9 @@ func (l *Levels) Len() int {
 	return total
 }
 
-func (l *Levels) Size() int64 {
-	var totalSize int64
-	for _, segment := range l.getAllSegmentsFlattened() {
+func (l *Levels) Size() uint64 {
+	var totalSize uint64
+	for _, segment := range l.GetAllSegmentsFlattened() {
 		totalSize += segment.Metadata.FileSize
 	}
 	return totalSize
@@ -232,7 +242,7 @@ func (l *Levels) ResolvedView() []*ResolvedLevel {
 	return output
 }
 
-func (l *Levels) getAllSegmentsFlattened() []*segment.Segment {
+func (l *Levels) GetAllSegmentsFlattened() []*segment.Segment {
 	var segments []*segment.Segment
 	for _, level := range l.Levels {
 		for _, segmentID := range level.Segments {
@@ -246,16 +256,16 @@ func (l *Levels) getAllSegmentsFlattened() []*segment.Segment {
 	return segments
 }
 
-func (l *Levels) getAllSegments() map[string]*segment.Segment {
+func (l *Levels) GetAllSegments() map[string]*segment.Segment {
 	segmentMap := make(map[string]*segment.Segment, l.Len())
-	for _, segment := range l.getAllSegmentsFlattened() {
+	for _, segment := range l.GetAllSegmentsFlattened() {
 		segmentMap[segment.Metadata.ID] = segment
 	}
 	return segmentMap
 }
 
-func (l *Levels) getSegments() map[string]*segment.Segment {
-	allSegments := l.getAllSegments()
+func (l *Levels) GetSegments() map[string]*segment.Segment {
+	allSegments := l.GetAllSegments()
 	segments := make(map[string]*segment.Segment, len(allSegments))
 	for id, segment := range allSegments {
 		if !l.HiddenSet.Contains(id) {

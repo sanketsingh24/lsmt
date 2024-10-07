@@ -41,15 +41,6 @@ type Metadata struct {
 }
 
 func MetadataFromWriter(id string, writer *Writer) (*Metadata, error) {
-	firstKey, ok := writer.FirstKey()
-	if !ok {
-		return nil, fmt.Errorf("should have written at least 1 item")
-	}
-	lastKey, ok := writer.LastKey()
-	if !ok {
-		return nil, fmt.Errorf("should have written at least 1 item")
-	}
-
 	return &Metadata{
 		ID:               id,
 		Version:          version.VersionV0,
@@ -61,8 +52,8 @@ func MetadataFromWriter(id string, writer *Writer) (*Metadata, error) {
 		Compression:      CompressionTypeLz4,
 		ItemCount:        uint64(writer.ItemCount),
 		KeyCount:         uint64(writer.KeyCount),
-		KeyRange:         [2]value.UserKey{firstKey, lastKey},
-		Seqnos:           [2]value.SeqNo{writer.LowestSeqno, writer.HighestSeqno},
+		KeyRange:         [2]value.UserKey{writer.FirstKey, writer.LastKey},
+		Seqnos:           [2]value.SeqNo{writer.LowestSeqNo, writer.HighestSeqNo},
 		TombstoneCount:   uint64(writer.TombstoneCount),
 		UncompressedSize: writer.UncompressedSize,
 	}, nil

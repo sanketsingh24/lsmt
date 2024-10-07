@@ -1,4 +1,4 @@
-package diskblock
+package disk
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 
 	"hash/crc32"
 
-	value "bagh/value"
+	"bagh/value"
 
 	"github.com/pierrec/lz4/v4"
 )
@@ -20,6 +20,7 @@ type DiskBlock[T value.SerDeClone] struct {
 }
 
 // @TODO: wtf i wrote here its 4am
+// So what we need this maybe?
 // func (db *DiskBlock) Clone() *DiskBlock {
 // 	newItems := make([]value.SerDeClone, len(db.Items))
 // 	for i, item := range db.Items {
@@ -32,9 +33,9 @@ type DiskBlock[T value.SerDeClone] struct {
 // }
 
 // FromReaderCompressed creates a DiskBlock from a compressed reader
-func (db *DiskBlock[T]) FromReaderCompressed(reader io.Reader, size uint32) error {
+func (db *DiskBlock[T]) FromReaderCompressed(file io.Reader, size uint32) error {
 	byt := make([]byte, size)
-	if _, err := io.ReadFull(reader, byt); err != nil {
+	if _, err := io.ReadFull(file, byt); err != nil {
 		return err
 	}
 	dest := make([]byte, size)
@@ -47,41 +48,42 @@ func (db *DiskBlock[T]) FromReaderCompressed(reader io.Reader, size uint32) erro
 
 // FromFileCompressed creates a DiskBlock from a compressed file
 // @TODO: check and remove io.readseeker as it is stupid
-func (db *DiskBlock[T]) FromFileCompressed(reader io.ReadSeeker, offset int64, size uint32) error {
-	if _, err := reader.Seek(offset, io.SeekStart); err != nil {
+func (db *DiskBlock[T]) FromFileCompressed(file io.ReadSeeker, offset int64, size uint32) error {
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	return db.FromReaderCompressed(reader, size)
+	return db.FromReaderCompressed(file, size)
 }
 
 // CreateCRC calculates the CRC from a list of values
-func (db *DiskBlock[T]) CreateCRC() (uint32, error) {
+func (db *DiskBlock[T]) CreateCRC() error {
 	hasher := crc32.NewIEEE()
 
 	if err := binary.Write(hasher, binary.BigEndian, uint32(len(db.Items))); err != nil {
-		return 0, err
+		return err
 	}
 
 	for _, value := range db.Items {
 		var buf bytes.Buffer
 		if err := value.Serialize(&buf); err != nil {
-			return 0, err
+			return err
 		}
 		if _, err := hasher.Write(buf.Bytes()); err != nil {
-			return 0, err
+			return err
 		}
 	}
+	db.CRC = hasher.Sum32()
 
-	return hasher.Sum32(), nil
+	return nil
 }
 
 // CheckCRC checks if the calculated CRC matches the expected CRC
 func (db *DiskBlock[T]) CheckCRC(expectedCRC uint32) (bool, error) {
-	crc, err := db.CreateCRC()
+	err := db.CreateCRC()
 	if err != nil {
 		return false, err
 	}
-	return crc == expectedCRC, nil
+	return db.CRC == expectedCRC, nil
 }
 
 // Serialize serializes the DiskBlock
@@ -101,9 +103,11 @@ func (db *DiskBlock[T]) Serialize(writer io.Writer) error {
 	}
 
 	return nil
+
 }
 
 // Deserialize deserializes the DiskBlock
+// @TODO: this seems iffy and might not work at all, bruh
 func (db *DiskBlock[T]) Deserialize(reader io.Reader) error {
 	if err := binary.Read(reader, binary.BigEndian, &db.CRC); err != nil {
 		return err
@@ -116,11 +120,11 @@ func (db *DiskBlock[T]) Deserialize(reader io.Reader) error {
 
 	db.Items = make([]T, itemCount)
 	for i := uint32(0); i < itemCount; i++ {
-		item := *new(value.SerDeClone)                   // Replace with your actual type
-		if err := item.Deserialize(reader); err != nil { // nil deref @TODO:
+		item := *new(T) // Replace with your actual type
+		if err := item.Deserialize(reader); err != nil {
 			return err
 		}
-		db.Items[i] = item.(T)
+		db.Items[i] = item
 	}
 
 	return nil

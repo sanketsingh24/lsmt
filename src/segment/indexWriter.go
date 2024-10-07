@@ -2,10 +2,14 @@ package segment
 
 import (
 	"bagh/file"
+	"bagh/value"
 	"bufio"
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/pierrec/lz4/v4"
 )
 
 func concatFiles(srcPath, destPath string) error {
@@ -63,17 +67,20 @@ func NewIndexWriter(path string, blockSize uint32) (*IndexWriter, error) {
 }
 
 func (w *IndexWriter) writeBlock() error {
-	var err error
-	w.blockChunk.CRC, err = w.blockChunk.CreateCRC()
+	// Serialize block
+	err := w.blockChunk.CreateCRC()
 	if err != nil {
 		return err
 	}
-	bytes, err := w.blockChunk.Serialize()
+	// bhb := new(BlockHandleBlock)
+	// bytes := make([]byte, 0, 65535) // u16::MAX @TODO:
+	buf := new(bytes.Buffer)
+	err = w.blockChunk.Serialize(buf)
 	if err != nil {
 		return err
 	}
 
-	if _, err := w.blockIndexWriter.Write(bytes); err != nil {
+	if _, err := w.blockIndexWriter.Write(buf.Bytes()); err != nil {
 		return err
 	}
 
@@ -81,17 +88,17 @@ func (w *IndexWriter) writeBlock() error {
 	w.indexChunk.Items = append(w.indexChunk.Items, BlockHandle{
 		StartKey: first.StartKey,
 		Offset:   w.filePos,
-		Size:     uint32(len(bytes)),
+		Size:     uint32(len(buf.Bytes())),
 	})
 
 	w.blockCounter = 0
 	w.blockChunk.Items = w.blockChunk.Items[:0]
-	w.filePos += uint64(len(bytes))
+	w.filePos += uint64(len(buf.Bytes()))
 
 	return nil
 }
 
-func (w *IndexWriter) RegisterBlock(startKey UserKey, offset uint64, size uint32) error {
+func (w *IndexWriter) RegisterBlock(startKey value.UserKey, offset uint64, size uint32) error {
 	blockHandleSize := uint32(len(startKey)) + 12 // 12 is the size of offset and size fields
 
 	reference := BlockHandle{
@@ -126,13 +133,24 @@ func (w *IndexWriter) writeTopLevelIndex(blockFileSize uint64) error {
 		w.indexChunk.Items[i].Offset += blockFileSize
 	}
 
-	w.indexChunk.CRC = w.indexChunk.CreateCRC()
-	bytes, err := serializeAndCompress(&w.indexChunk)
+	if err := w.indexChunk.CreateCRC(); err != nil {
+		return err
+	}
+
+	// @TODO: do these even work?
+	buf := new(bytes.Buffer)
+	err := w.indexChunk.Serialize(buf)
 	if err != nil {
 		return err
 	}
 
-	if _, err := w.indexIndexWriter.Write(bytes); err != nil {
+	compressor := new(lz4.Compressor)
+	compressedBytes := make([]byte, 0)
+	if _, err := compressor.CompressBlock(buf.Bytes(), compressedBytes); err != nil {
+		return err
+	}
+
+	if _, err := w.indexIndexWriter.Write(compressedBytes); err != nil {
 		return err
 	}
 

@@ -1,6 +1,9 @@
-package snapshot
+package tree
 
 import (
+	"bagh/prefix"
+	"bagh/ranger"
+	"bagh/segment"
 	"bagh/value"
 	"errors"
 	"io"
@@ -36,7 +39,7 @@ type Snapshot struct {
 }
 
 func NewSnapshot(tree *Tree, seqno value.SeqNo) *Snapshot {
-	tree.openSnapshots.Increment()
+	tree.TreeInner.OpenSnapshots.Increment()
 	log.Printf("Opening snapshot with seqno: %d", seqno)
 	return &Snapshot{
 		tree:  tree,
@@ -45,30 +48,43 @@ func NewSnapshot(tree *Tree, seqno value.SeqNo) *Snapshot {
 }
 
 func (s *Snapshot) Get(key []byte) (value.UserValue, error) {
-	// Implementation of get...
-	return nil, nil
+	entry, err := s.tree.GetInternalEntry(key, true, &s.seqno)
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		return nil, nil
+	}
+	return entry.Value, nil
 }
 
-func (s *Snapshot) Iter() *Range {
-	return s.tree.createIter(s.seqno)
+func (s *Snapshot) Iter() *ranger.Range {
+	return s.tree.CreateIter(&s.seqno)
 }
 
-func (s *Snapshot) Range(start, end []byte) *Range {
-	return s.tree.createRange(start, end, s.seqno)
+func (s *Snapshot) Range(start, end *segment.Bound[value.UserKey]) *ranger.Range {
+	return s.tree.CreateRange(start, end, &s.seqno)
 }
 
-func (s *Snapshot) Prefix(prefix []byte) *Prefix {
-	return s.tree.createPrefix(prefix, s.seqno)
+func (s *Snapshot) Prefix(prefix []byte) *prefix.Prefix {
+	return s.tree.CreatePrefix(prefix, &s.seqno)
 }
 
 func (s *Snapshot) FirstKeyValue() (value.UserKey, value.UserValue, error) {
-	// Implementation of first_key_value...
-	return nil, nil, nil
+	iter := s.Iter().IntoIter()
+	a, b, c := iter.Next()
+	if c {
+		return *a, *b, nil
+	}
+	return nil, nil, errors.ErrUnsupported
 }
 
 func (s *Snapshot) LastKeyValue() (value.UserKey, value.UserValue, error) {
-	// Implementation of last_key_value...
-	return nil, nil, nil
+	a, b, c := s.Iter().IntoIter().NextBack()
+	if c {
+		return *a, *b, nil
+	}
+	return nil, nil, errors.ErrUnsupported
 }
 
 func (s *Snapshot) ContainsKey(key []byte) (bool, error) {
@@ -94,11 +110,17 @@ func (s *Snapshot) IsEmpty() (bool, error) {
 }
 
 func (s *Snapshot) Len() (int, error) {
-	// Implementation of len...
-	return 0, nil
+	count := 0
+	iter := s.Iter().IntoIter()
+	ok := true
+	for ok {
+		_, _, ok = iter.Next()
+		count++
+	}
+	return count, errors.ErrUnsupported
 }
 
 func (s *Snapshot) Drop() {
 	log.Println("Closing snapshot")
-	s.tree.openSnapshots.Decrement()
+	s.tree.TreeInner.OpenSnapshots.Decrement()
 }

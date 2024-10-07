@@ -11,16 +11,17 @@ import (
 )
 
 type Segment struct {
-	descriptorTable *descriptor.FileDescriptorTable
-	metadata        *Metadata
-	blockIndex      *BlockIndex
-	blockCache      *BlockCache
+	DescriptorTable *descriptor.FileDescriptorTable
+	Metadata        *Metadata
+	BlockIndex      *BlockIndex
+	BlockCache      *BlockCache
 }
 
 func (s *Segment) String() string {
-	return fmt.Sprintf("Segment:%s", s.metadata.ID)
+	return fmt.Sprintf("Segment:%s", s.Metadata.ID)
 }
 
+// @p2: recover from snapshots, doesnt work rn
 func RecoverSegment(folder string, blockCache *BlockCache, descriptorTable *descriptor.FileDescriptorTable) (*Segment, error) {
 	metadata, err := MetadataFromDisk(filepath.Join(folder, file.SegmentMetadataFile))
 	if err != nil {
@@ -32,16 +33,16 @@ func RecoverSegment(folder string, blockCache *BlockCache, descriptorTable *desc
 	}
 
 	return &Segment{
-		descriptorTable: descriptorTable,
-		metadata:        metadata,
-		blockIndex:      blockIndex,
-		blockCache:      blockCache,
+		DescriptorTable: descriptorTable,
+		Metadata:        metadata,
+		BlockIndex:      blockIndex,
+		BlockCache:      blockCache,
 	}, nil
 }
 
 func (s *Segment) Get(key []byte, seqno *value.SeqNo) (*value.Value, error) {
 	if seqno != nil {
-		if s.metadata.Seqnos[0] >= *seqno {
+		if s.Metadata.Seqnos[0] >= *seqno {
 			return nil, nil
 		}
 	}
@@ -52,49 +53,49 @@ func (s *Segment) Get(key []byte, seqno *value.SeqNo) (*value.Value, error) {
 
 	if seqno == nil {
 		// Fast path for non-seqno reads
-		blockHandle, err := s.blockIndex.GetLatest(key)
+		blockHandle, err := s.BlockIndex.GetLatest(key)
 		if err != nil {
 			return nil, err
 		}
 		if blockHandle == nil {
 			return nil, nil
 		}
-
-		block, err := block.LoadAndCacheByBlockHandle(s.descriptorTable, s.blockCache, s.metadata.ID, blockHandle)
+		// returns valueblock
+		valueBlock, err := LoadAndCacheByBlockHandle(s.DescriptorTable, s.BlockCache, s.Metadata.ID, blockHandle)
 		if err != nil {
 			return nil, err
 		}
 
-		if block != nil {
-			for _, item := range block.Items {
+		if valueBlock != nil {
+			for _, item := range valueBlock.Items {
 				if bytes.Equal(item.Key, key) {
-					return item.Clone(), nil
+					return item.Clone().(*value.Value), nil
 				}
 			}
 		}
 		return nil, nil
 	} else {
 		// Path for seqno-based reads
-		blockHandle, err := s.blockIndex.GetLatest(key)
+		blockHandle, err := s.BlockIndex.GetLatest(key)
 		if err != nil {
 			return nil, err
 		}
 		if blockHandle != nil {
-			block, err := block.LoadAndCacheByBlockHandle(s.descriptorTable, s.blockCache, s.metadata.ID, blockHandle)
+			valueBlock, err := LoadAndCacheByBlockHandle(s.DescriptorTable, s.BlockCache, s.Metadata.ID, blockHandle)
 			if err != nil {
 				return nil, err
 			}
 
-			if block != nil {
-				for _, item := range block.Items {
-					if bytes.Equal(item.Key, key) && item.Seqno < *seqno {
-						return item.Clone(), nil
+			if valueBlock != nil {
+				for _, item := range valueBlock.Items {
+					if bytes.Equal(item.Key, key) && item.SeqNo < *seqno {
+						return item.Clone().(*value.Value), nil
 					}
 				}
 			}
 
 			// If not found in the first block, check the next block
-			nextBlockHandle, err := s.blockIndex.GetNextBlockKey(blockHandle.StartKey)
+			nextBlockHandle, err := s.BlockIndex.GetNextBlockKey(blockHandle.StartKey)
 			if err != nil {
 				return nil, err
 			}
@@ -103,7 +104,7 @@ func (s *Segment) Get(key []byte, seqno *value.SeqNo) (*value.Value, error) {
 			}
 
 			// Placeholder: Implement Reader
-			iter := NewReader(s.descriptorTable, s.metadata.ID, s.blockCache, s.blockIndex, nextBlockHandle.StartKey, nil)
+			iter := NewReader(s.DescriptorTable, s.Metadata.ID, s.BlockCache, s.BlockIndex, nextBlockHandle.StartKey, nil)
 
 			for {
 				item, err := iter.Next()
@@ -118,8 +119,8 @@ func (s *Segment) Get(key []byte, seqno *value.SeqNo) (*value.Value, error) {
 					return nil, nil
 				}
 
-				if item.Seqno < *seqno {
-					return item.Clone(), nil
+				if item.SeqNo < *seqno {
+					return item.Clone().(*value.Value), nil
 				}
 			}
 		}
@@ -128,83 +129,93 @@ func (s *Segment) Get(key []byte, seqno *value.SeqNo) (*value.Value, error) {
 	return nil, nil
 }
 
-func (s *Segment) Iter(useCache bool) *reader.Reader {
-	var cache *blockcache.BlockCache
+// @TODO: iterator??? returning reader???? tf
+func (s *Segment) Iter(useCache bool) *Reader {
+	var cache *BlockCache
 	if useCache {
-		cache = s.blockCache
+		cache = s.BlockCache
 	}
 
-	return reader.NewReader(s.descriptorTable, s.metadata.ID, cache, s.blockIndex, nil, nil)
+	return NewReader(s.DescriptorTable, s.Metadata.ID, cache, s.BlockIndex, nil, nil)
 }
 
-func (s *Segment) Range(start, end *value.UserKey) *Range {
-	return NewRange(s.descriptorTable, s.metadata.ID, s.blockCache, s.blockIndex, start, end)
+func (s *Segment) Range(start, end Bound[value.UserKey]) *Range {
+	// startBound := BoundedKey{
+	// 	Key:  *start,
+	// 	Type: Included,
+	// }
+	// endBound := BoundedKey{
+	// 	Key:  *end,
+	// 	Type: Included,
+	// }
+	return NewRange(s.DescriptorTable, s.Metadata.ID, s.BlockCache, s.BlockIndex, start, end)
 }
 
-func (s *Segment) Prefix(prefix []byte) *prefix.PrefixedReader {
-	return prefix.NewPrefixedReader(s.descriptorTable, s.metadata.ID, s.blockCache, s.blockIndex, prefix)
+func (s *Segment) Prefix(prefix []byte) *PrefixedReader {
+	return NewPrefixedReader(s.DescriptorTable, s.Metadata.ID, s.BlockCache, s.BlockIndex, prefix)
 }
 
 func (s *Segment) GetLSN() value.SeqNo {
-	return s.metadata.Seqnos[1]
+	return s.Metadata.Seqnos[1]
 }
 
 func (s *Segment) TombstoneCount() uint64 {
-	return s.metadata.TombstoneCount
+	return s.Metadata.TombstoneCount
 }
 
 func (s *Segment) keyRangeContains(key []byte) bool {
-	return s.metadata.KeyRangeContains(key)
+	return s.Metadata.KeyRangeContains(key)
 }
 
 func (s *Segment) CheckPrefixOverlap(prefix []byte) bool {
-	return s.metadata.CheckPrefixOverlap(prefix)
+	return s.Metadata.CheckPrefixOverlap(prefix)
 }
 
-func (s *Segment) CheckKeyRangeOverlap(lo, hi Bound) bool {
-	segmentLo := s.metadata.KeyRange[0]
-	segmentHi := s.metadata.KeyRange[1]
+// @TODO: check if works
+func (s *Segment) CheckKeyRangeOverlap(lo, hi Bound[value.UserKey]) bool {
+	segmentLo := s.Metadata.KeyRange[0]
+	segmentHi := s.Metadata.KeyRange[1]
 
 	// If both bounds are unbounded, the range overlaps with everything
-	if lo == Unbounded && hi == Unbounded {
+	if lo.Unbounded == true && hi.Unbounded == true {
 		return true
 	}
 
 	// If upper bound is unbounded
-	if hi == Unbounded {
-		if lo == Unbounded {
+	if hi.Unbounded == true {
+		if lo.Unbounded == true {
 			panic("Invalid key range check")
 		}
-		if lo.Inclusive {
-			return bytes.Compare(lo.Value, segmentHi) <= 0
+		if lo.Included != nil {
+			return bytes.Compare(*lo.Included, segmentHi) <= 0
 		}
-		return bytes.Compare(lo.Value, segmentHi) < 0
+		return bytes.Compare(*lo.Excluded, segmentHi) < 0
 	}
 
 	// If lower bound is unbounded
-	if lo == Unbounded {
-		if hi == Unbounded {
+	if lo.Unbounded == true {
+		if hi.Unbounded == true {
 			panic("Invalid key range check")
 		}
-		if hi.Inclusive {
-			return bytes.Compare(hi.Value, segmentLo) >= 0
+		if hi.Included != nil {
+			return bytes.Compare(*hi.Included, segmentLo) >= 0
 		}
-		return bytes.Compare(hi.Value, segmentLo) > 0
+		return bytes.Compare(*hi.Excluded, segmentLo) > 0
 	}
 
 	// Both bounds are bounded
 	loIncluded := false
-	if lo.Inclusive {
-		loIncluded = bytes.Compare(lo.Value, segmentHi) <= 0
+	if lo.Included != nil {
+		loIncluded = bytes.Compare(*lo.Included, segmentHi) <= 0
 	} else {
-		loIncluded = bytes.Compare(lo.Value, segmentHi) < 0
+		loIncluded = bytes.Compare(*lo.Excluded, segmentHi) < 0
 	}
 
 	hiIncluded := false
-	if hi.Inclusive {
-		hiIncluded = bytes.Compare(hi.Value, segmentLo) >= 0
+	if hi.Included != nil {
+		hiIncluded = bytes.Compare(*hi.Included, segmentLo) >= 0
 	} else {
-		hiIncluded = bytes.Compare(hi.Value, segmentLo) > 0
+		hiIncluded = bytes.Compare(*hi.Excluded, segmentLo) > 0
 	}
 
 	return loIncluded && hiIncluded

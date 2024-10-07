@@ -1,28 +1,107 @@
+// @TODO: check if Iterators work as expected
+
 package merge
 
 import (
 	"bagh/value"
+	"bytes"
 	"container/heap"
 	"errors"
 )
 
+// @TODO: bro check these
 type IteratorIndex int
-type BoxedIterator func() (value.Value, error)
-type MinMaxHeap []*IteratorValue
-
-// @TODO: get a better way to implement heap
-func (h MinMaxHeap) Len() int           { return len(h) }
-func (h MinMaxHeap) Less(i, j int) bool { return h[i].Value.Less(h[j].Value) }
-func (h MinMaxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *MinMaxHeap) Push(x interface{}) {
-	*h = append(*h, x.(*IteratorValue))
+type MinMaxHeap struct {
+	minHeap *minHeap
+	maxHeap *maxHeap
 }
-func (h *MinMaxHeap) Pop() interface{} {
+
+func NewMinMaxHeap() *MinMaxHeap {
+	return &MinMaxHeap{
+		minHeap: &minHeap{},
+		maxHeap: &maxHeap{},
+	}
+}
+
+func (h *MinMaxHeap) Push(x IteratorValue) {
+	heap.Push(h.minHeap, x)
+	heap.Push(h.maxHeap, x)
+}
+
+func (h *MinMaxHeap) PopMin() IteratorValue {
+	min := heap.Pop(h.minHeap).(IteratorValue)
+	h.maxHeap.remove(min)
+	return min
+}
+
+func (h *MinMaxHeap) PopMax() IteratorValue {
+	max := heap.Pop(h.maxHeap).(IteratorValue)
+	h.minHeap.remove(max)
+	return max
+}
+
+func (h *MinMaxHeap) Len() int {
+	return h.minHeap.Len()
+}
+
+type minHeap []IteratorValue
+
+func (h minHeap) Len() int           { return len(h) }
+func (h minHeap) Less(i, j int) bool { return bytes.Compare(h[i].Value.Key, h[j].Value.Key) < 0 }
+func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *minHeap) Push(x interface{}) {
+	*h = append(*h, x.(IteratorValue))
+}
+
+func (h *minHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
-	item := old[n-1]
+	x := old[n-1]
 	*h = old[0 : n-1]
-	return item
+	return x
+}
+
+func (h *minHeap) remove(x IteratorValue) {
+	for i, v := range *h {
+		if v.Index == x.Index {
+			heap.Remove(h, i)
+			return
+		}
+	}
+}
+
+type maxHeap []IteratorValue
+
+func (h maxHeap) Len() int           { return len(h) }
+func (h maxHeap) Less(i, j int) bool { return bytes.Compare(h[i].Value.Key, h[j].Value.Key) > 0 }
+func (h maxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *maxHeap) Push(x interface{}) {
+	*h = append(*h, x.(IteratorValue))
+}
+
+func (h *maxHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+// @TODO: check if remove works
+func (h *maxHeap) remove(x IteratorValue) {
+	for i, v := range *h {
+		if v.Index == x.Index {
+			heap.Remove(h, i)
+			return
+		}
+	}
+}
+
+type Iterator interface {
+	Next() (*value.Value, error)
+	NextBack() (*value.Value, error)
 }
 
 type IteratorValue struct {
@@ -34,52 +113,83 @@ func (v *IteratorValue) Less(other *value.Value) bool {
 	return string(v.Value.Key) < string(other.Key)
 }
 
+// type BoxedIterator struct {
+// 	data []value.Value
+// 	pos  int
+// }
+
+// func NewBoxedIterator(values []value.Value) *BoxedIterator {
+// 	return &BoxedIterator{data: values, pos: 0}
+// }
+
+// func (it *BoxedIterator) Next() (*value.Value, error) {
+// 	if it.pos >= len(it.data) {
+// 		return nil, errors.New("out of range")
+// 	}
+// 	value := it.data[it.pos]
+// 	it.pos++
+// 	return &value, nil
+// }
+
+// func (it *BoxedIterator) NextBack() (*value.Value, error) {
+// 	if it.pos <= 0 {
+// 		return nil, errors.New("out of range")
+// 	}
+// 	it.pos--
+// 	value := it.data[it.pos]
+// 	return &value, nil
+// }
+
 type MergeIterator struct {
-	iterators        []BoxedIterator
-	heap             MinMaxHeap
-	evictOldVersions bool
-	snapshotSeqNo    *uint64
+	Iterators        []Iterator
+	Heap             MinMaxHeap
+	EvictOldVersions bool
+	SnapshotSeqNo    *value.SeqNo
 }
 
-func NewMergeIterator(iterators []BoxedIterator) *MergeIterator {
+func NewMergeIterator(Iterators []Iterator) *MergeIterator {
 	return &MergeIterator{
-		iterators:        iterators,
-		heap:             MinMaxHeap{},
-		evictOldVersions: false,
-		snapshotSeqNo:    nil,
+		Iterators:        Iterators,
+		Heap:             MinMaxHeap{},
+		EvictOldVersions: false,
+		SnapshotSeqNo:    nil,
 	}
 }
 
-func (it *MergeIterator) EvictOldVersions(v bool) *MergeIterator {
-	it.evictOldVersions = v
+func (it *MergeIterator) EvictOldVersion(v bool) *MergeIterator {
+	it.EvictOldVersions = v
 	return it
 }
 
-func (it *MergeIterator) SnapshotSeqNo(v uint64) *MergeIterator {
-	it.snapshotSeqNo = &v
+func (it *MergeIterator) SnapshotSeq(v value.SeqNo) *MergeIterator {
+	it.SnapshotSeqNo = &v
 	return it
 }
 
+// check @TODO:
 func (it *MergeIterator) advanceIter(idx int) error {
-	value, err := it.iterators[idx]()
+	value, err := it.Iterators[idx].Next()
 	if err != nil {
 		return err
 	}
-	heap.Push(&it.heap, &IteratorValue{Index: idx, Value: value})
+	// @TODO: ?? why u using global heap here
+	// heap.Push(&IteratorValue{Index: idx, Value: *value})
+	it.Heap.Push(IteratorValue{Index: idx, Value: *value})
 	return nil
 }
 
+// @TODO: do this
 func (it *MergeIterator) advanceIterBackwards(idx int) error {
-	value, err := it.iterators[idx]()
+	value, err := it.Iterators[idx].NextBack()
 	if err != nil {
 		return err
 	}
-	heap.Push(&it.heap, &IteratorValue{Index: idx, Value: value})
+	it.Heap.Push(IteratorValue{Index: idx, Value: *value})
 	return nil
 }
 
 func (it *MergeIterator) pushNext() error {
-	for idx := range it.iterators {
+	for idx := range it.Iterators {
 		if err := it.advanceIter(idx); err != nil {
 			return err
 		}
@@ -88,7 +198,7 @@ func (it *MergeIterator) pushNext() error {
 }
 
 func (it *MergeIterator) pushNextBack() error {
-	for idx := range it.iterators {
+	for idx := range it.Iterators {
 		if err := it.advanceIterBackwards(idx); err != nil {
 			return err
 		}
@@ -97,38 +207,40 @@ func (it *MergeIterator) pushNextBack() error {
 }
 
 func (it *MergeIterator) Next() (*value.Value, error) {
-	if len(it.heap) == 0 {
+	// @TODO: lengths can diverge
+	if it.Heap.minHeap.Len() == 0 {
 		if err := it.pushNext(); err != nil {
 			return nil, err
 		}
 	}
 
-	for len(it.heap) > 0 {
-		head := heap.Pop(&it.heap).(*IteratorValue)
+	for it.Heap.minHeap.Len() > 0 {
+		head := it.Heap.PopMax()
 		idx := head.Index
 		if err := it.advanceIter(idx); err != nil {
 			return nil, err
 		}
 
-		if head.Value.ValueType == value.Tombstone || it.evictOldVersions {
-			for len(it.heap) > 0 {
-				next := heap.Pop(&it.heap).(*IteratorValue)
+		if head.Value.IsTombstone() || it.EvictOldVersions {
+			//does this cache like js? @TODO: check if len updates on pop
+			for it.Heap.minHeap.Len() > 0 {
+				next := it.Heap.PopMin()
 				if string(next.Value.Key) == string(head.Value.Key) {
 					if err := it.advanceIter(next.Index); err != nil {
 						return nil, err
 					}
 
-					if it.snapshotSeqNo != nil && head.Value.SeqNo >= *it.snapshotSeqNo {
+					if it.SnapshotSeqNo != nil && head.Value.SeqNo >= *it.SnapshotSeqNo {
 						head = next
 					}
 				} else {
-					heap.Push(&it.heap, next)
+					it.Heap.Push(next)
 					break
 				}
 			}
 		}
 
-		if it.snapshotSeqNo != nil && head.Value.SeqNo >= *it.snapshotSeqNo {
+		if it.SnapshotSeqNo != nil && head.Value.SeqNo >= *it.SnapshotSeqNo {
 			continue
 		}
 
@@ -136,4 +248,65 @@ func (it *MergeIterator) Next() (*value.Value, error) {
 	}
 
 	return nil, errors.New("iterator exhausted")
+}
+
+func (it *MergeIterator) NextBack() (*value.Value, error) {
+	if it.Heap.maxHeap.Len() == 0 {
+		if err := it.pushNextBack(); err != nil {
+			return nil, err
+		}
+	}
+
+	for it.Heap.maxHeap.Len() > 0 {
+		head := it.Heap.PopMax()
+		if err := it.advanceIterBackwards(head.Index); err != nil {
+			return nil, err
+		}
+
+		reachedTombstone := false
+
+		if head.Value.IsTombstone() || it.EvictOldVersions {
+			next := it.Heap.PopMax()
+			for it.Heap.maxHeap.Len() > 0 && bytes.Equal(next.Value.Key, head.Value.Key) {
+				if reachedTombstone {
+					continue
+				}
+
+				next := it.Heap.PopMax()
+				if err := it.advanceIterBackwards(next.Index); err != nil {
+					return nil, err
+				}
+
+				if next.Value.ValueType == value.Tombstone {
+					if it.SnapshotSeqNo != nil {
+						if next.Value.SeqNo < *it.SnapshotSeqNo {
+							reachedTombstone = true
+						}
+					} else {
+						reachedTombstone = true
+					}
+				}
+
+				if it.SnapshotSeqNo != nil {
+					if next.Value.SeqNo < *it.SnapshotSeqNo {
+						head = next
+					}
+				} else {
+					head = next
+				}
+			}
+		}
+
+		if it.SnapshotSeqNo != nil && head.Value.SeqNo >= *it.SnapshotSeqNo {
+			continue
+		}
+
+		if reachedTombstone {
+			continue
+		}
+
+		return &head.Value, nil
+	}
+
+	return nil, nil
 }
